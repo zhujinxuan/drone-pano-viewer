@@ -1,0 +1,91 @@
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: #0f1014;
+  color: #e6e6ea;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+.app {
+  display: flex;
+  height: 100%;
+}
+
+.viewer-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.viewer {
+  position: absolute;
+  inset: 0;
+}
+
+/* Title banner — top of the viewer, above the canvas. */
+.title-banner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  padding: 10px 16px 22px;
+  background: linear-gradient(rgba(10, 10, 14, 0.85), rgba(10, 10, 14, 0.45) 70%, transparent);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-shadow: 0 1px 2px #000;
+  pointer-events: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Live yaw/pitch/FOV readout — top-right over the canvas. */
+.hud {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 10;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgba(10, 10, 14, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  font-family: ui-monospace, Consolas, "Cascadia Mono", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #cdd2dc;
+  pointer-events: none;
+  white-space: pre;
+}
+
+/* Full-cover message states (fetch error / empty manifest / initial load). */
+.overlay-msg {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  background: #0f1014;
+  font-size: 14px;
+  color: #9aa0ab;
+  text-align: center;
+}
+
+.overlay-msg strong {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 16px;
+  color: #e6e6ea;
+}
+
+.overlay-detail {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  opacity: 0.8;
+}
