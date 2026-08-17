@@ -68,6 +68,7 @@ export default function App() {
       container,
       panorama: panoramaUrl,
       navbar: ["zoom", "move", "fullscreen"],
+      keyboard: "always",
       plugins: [CompassPlugin.withConfig({ position: "bottom left", size: "110px" })],
     });
 
