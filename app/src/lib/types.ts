@@ -13,4 +13,13 @@ export interface PhotoEntry {
   lon: number | null;
   /** Latitude decoded from the geohash stem, or null for `nogps-*`. */
   lat: number | null;
+  /** Title from the active playlist, if any. */
+  title?: string;
+}
+
+/** Envelope returned by GET /api/photos (both playlist and plain mode). */
+export interface PhotosManifest {
+  photos: PhotoEntry[];
+  /** True when the viewer was started with `--playlist` (photos are the ordered, titled subset). */
+  playlist: boolean;
 }

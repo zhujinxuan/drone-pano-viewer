@@ -3,6 +3,7 @@
  * pano — drone panorama viewer CLI.
  *
  *   pano view <file-or-dir> [--id <geohash8>] [--near <lon,lat>] [--title <text>]
+ *                         [--playlist <file.json>]
  *   pano list <dir> [--json]
  *
  * `view` starts the Vite dev server programmatically on an ephemeral port,
@@ -13,18 +14,25 @@ import fs from "node:fs";
 import path from "node:path";
 import open from "open";
 import { haversineKm, type LonLat } from "./src/lib/geohash.ts";
+import { applyPlaylist, parsePlaylist, type PlaylistEntry } from "./src/lib/playlist.ts";
 import { scanPhotos, type PhotoEntry } from "./src/lib/scan.ts";
 
 const HELP = `pano — drone panorama viewer
 
-Usage:
   pano view <file-or-dir> [--id <geohash8>] [--near <lon,lat>] [--title <text>]
+                        [--playlist <file.json>]
       Serve the photos dir (a file argument serves its parent dir) and open
       the viewer in the default browser. Selection precedence:
         --id <geohash8>   exact photo by filename stem
         --near <lon,lat>  photo with min haversine distance from the point
         (file argument)  the stem of the given file
         (default)        first photo in the manifest
+      --playlist <file.json>
+                        JSON array [{ "id": "<stem>", "title": "<text>" }, …]
+                        restricting the viewer to an ordered, titled subset of
+                        the dir scan. Ids must exist in the scan. With a
+                        playlist, --id/--near must resolve inside it and the
+                        default selection is the first playlist entry.
   pano list <dir> [--json]
       Print the photo manifest without starting a server.
 `;
@@ -138,7 +146,35 @@ async function runView(args: Args): Promise<void> {
   const { dir, fileStem } = resolvePhotosDir(target);
   const photos = scanPhotos(dir);
   if (photos.length === 0) die(`no .jpg panoramas found under ${dir} (unpulled DVC objects are skipped)`);
-  const selected = selectPhoto(photos, {
+
+  // Playlist: read + validate ids against the scan NOW (fail fast), hand the
+  // raw JSON to the dev server via env, and restrict selection to the subset.
+  let pool = photos;
+  let playlistFile: string | null = null;
+  let playlist: PlaylistEntry[] = [];
+  if (args.flags.playlist !== undefined) {
+    playlistFile = args.flags.playlist;
+    if (!playlistFile) die("--playlist expects a <file.json> path");
+    let raw: string;
+    try {
+      raw = fs.readFileSync(path.resolve(playlistFile), "utf8");
+    } catch (e) {
+      die(`cannot read playlist ${playlistFile} — ${(e as Error).message}`);
+    }
+    try {
+      playlist = parsePlaylist(raw);
+    } catch (e) {
+      die(`${playlistFile}: ${(e as Error).message}`);
+    }
+    try {
+      pool = applyPlaylist(photos, playlist); // dies listing unknown ids
+    } catch (e) {
+      die(`${playlistFile}: ${(e as Error).message}`);
+    }
+    if (pool.length === 0) die(`${playlistFile}: playlist is empty`);
+    process.env.PANO_PLAYLIST = raw;
+  }
+  const selected = selectPhoto(pool, {
     id: args.flags.id,
     near: args.flags.near ? parseNear(args.flags.near) : undefined,
     fileStem,
@@ -154,12 +190,12 @@ async function runView(args: Args): Promise<void> {
   });
   await server.listen();
   const base = server.resolvedUrls?.local?.[0] ?? `http://localhost:${server.config.server.port}/`;
+  console.log(`pano: serving ${pool.length} of ${photos.length} photo(s) from ${dir}` + (playlistFile ? ` (playlist ${playlistFile})` : ""));
   const qs = new URLSearchParams({ id: selected.id });
   if (args.flags.title) qs.set("title", args.flags.title);
+  console.log(`pano: selected ${selected.relPath}` + (selected.title ? ` — ${selected.title}` : "") + (selected.lon !== null ? ` (${selected.lon.toFixed(6)}, ${selected.lat!.toFixed(6)})` : " (no gps)"));
   const url = `${base}?${qs}`;
 
-  console.log(`pano: serving ${photos.length} photo(s) from ${dir}`);
-  console.log(`pano: selected ${selected.relPath}` + (selected.lon !== null ? ` (${selected.lon.toFixed(6)}, ${selected.lat!.toFixed(6)})` : " (no gps)"));
   console.log(url);
 
   open(url, { wait: false }).catch(() =>

@@ -2,14 +2,19 @@ import fs from "node:fs";
 import path from "node:path";
 import react from "@vitejs/plugin-react";
 import { defineConfig, type Plugin } from "vite";
+import { applyPlaylist, parsePlaylist } from "./src/lib/playlist.ts";
 import { scanPhotos } from "./src/lib/scan.ts";
+import type { PhotosManifest } from "./src/lib/types.ts";
 
 /**
  * Dev-server middlewares exposing the pano photos dir.
- * The dir arrives via `PANO_PHOTOS_DIR` (set by cli.ts before createServer).
+ * The dir arrives via `PANO_PHOTOS_DIR` and, optionally, the playlist JSON via
+ * `PANO_PLAYLIST` (both set by cli.ts before createServer).
  *
- *  - GET /api/photos    → JSON manifest `[{ id, name, relPath, url, lon, lat }]`
- *                         (rescanned per request, so newly pulled DVC files appear on refresh)
+ *  - GET /api/photos    → JSON envelope { photos, playlist }
+ *                         photos = [{ id, name, relPath, url, lon, lat, title? }]
+ *                         (rescanned per request, so newly pulled DVC files appear
+ *                         on refresh; the playlist is re-applied on top each time)
  *  - GET /photos/<rel>  → photo bytes, 404 for missing/unpulled files
  */
 function panoPhotos(): Plugin {
@@ -28,7 +33,21 @@ function panoPhotos(): Plugin {
           );
           return;
         }
-        res.end(JSON.stringify(scanPhotos(dir)));
+        // Per-request: newly pulled files appear on refresh, and a playlist id
+        // that went missing (file removed) surfaces as a 500 instead of a silent gap.
+        let manifest: PhotosManifest | null;
+        try {
+          const photos = scanPhotos(dir);
+          const raw = process.env.PANO_PLAYLIST;
+          manifest = raw
+            ? { photos: applyPlaylist(photos, parsePlaylist(raw)), playlist: true }
+            : { photos, playlist: false };
+        } catch (e) {
+          res.statusCode = 500;
+          res.end(JSON.stringify({ error: (e as Error).message }));
+          manifest = null;
+        }
+        if (manifest) res.end(JSON.stringify(manifest));
       });
 
       server.middlewares.use("/photos", (req, res) => {

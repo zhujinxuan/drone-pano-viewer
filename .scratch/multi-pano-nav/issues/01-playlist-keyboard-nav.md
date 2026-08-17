@@ -1,6 +1,6 @@
 # 01 — Playlist: multi-pano load + keyboard navigation
 
-Status: ready-for-agent
+Status: resolved
 Type: task
 
 ## Requirement (user, 2026-08-17)
@@ -34,3 +34,31 @@ between panos; arrows/scroll are owned by the sphere view and must not be stolen
 
 - 2026-08-17 — Requirement raised mid-build; grilled R1 (CLI shape), R3 (keys),
   R4 (nav UI), R5 (transition). All four settled as above. Not yet implemented.
+
+## Answer
+
+Implemented 2026-08-17 (two parallel slices, TDD seam on `src/lib/playlist.ts`):
+
+- CLI `--playlist <file.json>`: strict parse + fail-fast id validation against the
+  scan (dies listing unknown ids); `--id`/`--near` restricted to playlist entries
+  when active; passes raw JSON to the server via `PANO_PLAYLIST` env.
+- `/api/photos` is now an envelope `{ photos, playlist }`; playlist mode returns
+  the ordered titled subset, rescan per request (new pulls appear, vanished ids
+  surface as HTTP 500). `PhotoEntry.title?` added.
+- UI: `?pos=N` (0-based) + `?id` fallback; `[`/`]`/`p`/`n` wrap-around switching;
+  zoom level carried across switches (yaw/pitch reset); next photo preloaded via
+  `Image`; NavStrip `‹ N/M ›` + next-title ghost (clickable); switch flash
+  (1.2s fade); title precedence `?title` > playlist > id+EXIF datetime.
+- Verification: 12/12 vitest, tsc clean, browser-verified on real Songyuan data
+  (3-entry playlist incl. one 4:3 frame): switching, zoom carry-over (60→57.6
+  persisted), flash text, ghost text, wrap-around, `?pos` replaceState.
+
+## Review outcome (code-review, two axes)
+
+- Standards: no documented standards in repo (smell baseline only) — 4 P3
+  judgement calls, none blocking (dead eslint-disable, flash duration duplicated
+  TS/CSS, title-precedence written twice, nullable sentinel in vite.config).
+- Spec: coverage complete. Two P3 deviations accepted deliberately: title flash
+  also fires on initial load (reads as a welcome card, kept); unknown `?id` in
+  playlist mode shows a blocking error overlay (sanctioned in the implementation
+  contract — loud failure beats silently opening the wrong pano).
