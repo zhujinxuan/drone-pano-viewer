@@ -1,27 +1,48 @@
 ---
 name: drone-pano-viewer
-description: View stitched drone panorama photos (equirectangular 踏勘全景) in a local PTGui/720yun-like web viewer, and open the panorama nearest a given location. Use when the user mentions 全景/drone panorama viewing, 踏勘图片查看, or "find drone photos near X / open the viewer".
+description: View stitched drone panorama photos (equirectangular 踏勘全景) in a local PTGui/720yun-like web viewer — open one pano, the pano nearest a location, or a titled playlist to keyboard-review many. Use when the user mentions 全景/drone panorama viewing, 踏勘图片查看, or "find drone photos near X / open the viewer".
 ---
 
 # drone-pano-viewer
 
-Local web viewer for stitched drone panos (2:1 equirectangular DJI JPGs, 10–30 MB). This skill folder is the app repo; the app lives in `app/` (Vite + React + TS) and shows a photo-sphere viewer with yaw/pitch/FOV overlay, title banner, and a DJI EXIF/XMP metadata panel.
+Local web viewer for drone panos. This skill folder is the app repo; the app lives in `app/` (Vite + React) and shows a photo-sphere viewer with yaw/pitch/FOV overlay, title banner, and a DJI EXIF/XMP metadata panel.
+
+## File naming contract
+
+The viewer reads position and identity **from filenames** — nothing else:
+
+- `<geohash8>.jpg` — stem is an 8-char base32 geohash of the capture position; it is the pano's `id` and decodes to lon/lat (±20 m).
+- `nogps-<anything>.jpg` — no position: reachable by `--id`, never by `--near`.
+- Any nesting below the photos dir is fine (typically `{dir}/{date}/{geohash8}.jpg`); the scan is recursive.
+- Expected content is 2:1 equirectangular (e.g. 14400×7200). Other aspect ratios currently render distorted on the sphere — a known open limitation (`.scratch/multi-pano-nav/issues/02`).
 
 ## Workflow
 
-1. Locate the photos dir. Typical (Songyuan 1.2GW project): `resources/2026-07-27-drone-panorama/step-01-panorama/outputs/` with panos at `{date}/{geohash8}.jpg`; a spatial index `panorama-index.gpkg` may sit alongside.
-2. **Pre-pull DVC-tracked panos before invoking the app — the app never runs DVC.** For qiniu remotes set `NO_PROXY='*'` (the system proxy breaks the pull); credentials stay in each project's `.dvc/config.local`. On an rclone-mounted dir the files already exist and no pull is needed.
+1. Locate the photos dir (Songyuan 1.2GW example: `resources/2026-07-27-drone-panorama/step-01-panorama/outputs/`).
+2. **Pre-pull DVC-tracked panos before invoking the app — the app never runs DVC.** For qiniu remotes set `NO_PROXY='*'` (the system proxy breaks the pull); credentials stay in each project's `.dvc/config.local`. On an rclone mount the files already exist; skip the pull.
 3. Run from `app/` (`npm install` once first):
 
    ```
-   npm run pano -- view <file-or-dir> [--id <geohash8>] [--near <lon,lat>] [--title <text>]
+   npm run pano -- view <file-or-dir> [--id <geohash8>] [--near <lon,lat>]
+                       [--title <text>] [--playlist <file.json>]
    npm run pano -- list <dir> [--json]
    ```
 
-   `view` starts the server and opens the browser on the chosen pano, printing its URL to stdout. A file argument serves that file's directory; a directory argument is scanned recursively. `--id` selects by filename stem; `--near` picks the pano at minimum distance from the point (positions decode from geohash8 stems — resolve place names to lon/lat yourself; the app takes raw coordinates). `list` only scans and prints the manifest — `[{ id, name, relPath, url, lon, lat }]` with `--json` — starting no server.
+   `view` serves the dir (a file argument serves its parent dir), opens the browser on the chosen pano, prints the URL. Selection precedence: `--id` > `--near` (min haversine over decoded stems — resolve place names to lon/lat yourself) > file stem > first photo. `list` prints the manifest `{ photos: [{ id, name, relPath, url, lon, lat, title? }], playlist }` and starts no server.
+4. Done when the browser shows the intended pano with the intended title.
+
+## Playlist review sessions
+
+For "review these 10–20 spots" requests, write a playlist file yourself (titles are where you put the human meaning — spot names, turbine ids, dates):
+
+```json
+[{ "id": "wzbjs1gm", "title": "FS3 · 机位北側" }, { "id": "wzbjsr6x" }]
+```
+
+Pass it with `--playlist`; the viewer restricts to that ordered subset and the user switches with `[` / `]` (or `p` / `n`), wrap-around, bottom nav strip showing `‹ N/M ›` and the next title. Ids must exist in the dir — the CLI fails fast listing unknown ones. Viewer URLs carry `?pos=N`, so a refresh keeps the place.
 
 ## Caveats
 
-- Files named `nogps-*` have no position (`lon`/`lat` are `null`): select them with `--id`, never `--near`.
-- Viewer URLs take `?id=<geohash8>&title=<text>`; without `id` the first photo is shown, titled id + EXIF datetime.
+- Title precedence: `--title` > playlist entry title > `id · EXIF capture time`.
+- Files named `nogps-*` have `lon`/`lat` null in the manifest.
 - Runs on Windows Node; no WSL involved.
