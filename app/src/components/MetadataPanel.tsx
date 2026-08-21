@@ -5,6 +5,8 @@ export interface MetadataPanelProps {
   imageUrl: string;
   /** Fires once per parse with UTCAtExposure (or DateTimeOriginal) as an ISO string, null when none found. */
   onCaptureTime?: (iso: string | null) => void;
+  /** Fires once per parse with drone-dji RelativeAltitude in meters, null when absent. */
+  onRelativeAltitude?: (m: number | null) => void;
 }
 
 type Meta = Record<string, unknown>;
@@ -210,7 +212,7 @@ const CSS = `
 .dji-mp-tab:hover{color:#e6e6ea}
 `;
 
-export default function MetadataPanel({ imageUrl, onCaptureTime }: MetadataPanelProps) {
+export default function MetadataPanel({ imageUrl, onCaptureTime, onRelativeAltitude }: MetadataPanelProps) {
   const [meta, setMeta] = useState<Meta | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -237,16 +239,18 @@ export default function MetadataPanel({ imageUrl, onCaptureTime }: MetadataPanel
       if (m === null || Object.keys(m).length === 0) {
         setError("No EXIF/XMP metadata found in this file.");
         onCaptureTime?.(null);
+        onRelativeAltitude?.(null);
       } else {
         setMeta(m);
         onCaptureTime?.(str(m.UTCAtExposure) ?? stamp(m.DateTimeOriginal));
+        onRelativeAltitude?.(num(m.RelativeAltitude));
       }
       setLoading(false);
     })();
     return () => {
       cancelled = true;
     };
-  }, [imageUrl, onCaptureTime]);
+  }, [imageUrl, onCaptureTime, onRelativeAltitude]);
 
   const groups = meta === null ? [] : buildGroups(meta);
   const fileName = decodeURIComponent(imageUrl.split("/").pop() ?? imageUrl);

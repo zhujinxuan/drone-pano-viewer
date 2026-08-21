@@ -4,6 +4,7 @@ import { CompassPlugin } from "@photo-sphere-viewer/compass-plugin";
 import "@photo-sphere-viewer/core/index.css";
 import "@photo-sphere-viewer/compass-plugin/index.css";
 import type { PhotoEntry, PhotosManifest } from "./lib/types";
+import { formatDistanceHud, groundDistance } from "./lib/ground-distance";
 import MetadataPanel from "./components/MetadataPanel";
 import NavStrip from "./components/NavStrip";
 
@@ -37,6 +38,7 @@ export default function App() {
   const [error, setError] = useState<ErrorState | null>(null);
   const [hud, setHud] = useState<HudState>({ yaw: 0, pitch: 0, fov: 90 });
   const [captureTime, setCaptureTime] = useState<string | null>(null);
+  const [relAlt, setRelAlt] = useState<number | null>(null);
   const [flash, setFlash] = useState<{ n: number; text: string } | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const viewerRef = useRef<Viewer | null>(null);
@@ -57,9 +59,10 @@ export default function App() {
     titleParam ?? current?.title ?? `${current?.id ?? ""}${timeText}`;
   const panoramaUrl = current?.url ?? null;
 
-  // Each pano carries its own EXIF capture time.
+  // Each pano carries its own EXIF capture time and XMP altitude.
   useEffect(() => {
     setCaptureTime(null);
+    setRelAlt(null);
   }, [panoramaUrl]);
 
   useEffect(() => {
@@ -228,12 +231,21 @@ export default function App() {
       <div className="viewer-wrap">
         <div ref={containerRef} className="viewer" />
         {title !== "" && <div className="title-banner">{title}</div>}
-        <div className="hud" aria-live="polite">
+        {panoramaUrl !== null && <div className="reticle" aria-hidden="true" />}
+        <div
+          className="hud"
+          aria-live="polite"
+          title="dist: flat-ground estimate from this pano's XMP RelativeAltitude (height above takeoff). Slopes and buildings degrade it, especially at shallow pitch."
+        >
           yaw {(hud.yaw * DEG).toFixed(1)}° · pitch {(hud.pitch * DEG).toFixed(1)}° · fov{" "}
-          {hud.fov.toFixed(1)}°
+          {hud.fov.toFixed(1)}° · dist {formatDistanceHud(groundDistance(relAlt, hud.pitch))}
         </div>
         {panoramaUrl !== null && (
-          <MetadataPanel imageUrl={panoramaUrl} onCaptureTime={setCaptureTime} />
+          <MetadataPanel
+            imageUrl={panoramaUrl}
+            onCaptureTime={setCaptureTime}
+            onRelativeAltitude={setRelAlt}
+          />
         )}
         <NavStrip
           pos={pos ?? 0}
