@@ -7,6 +7,12 @@ description: View stitched drone panorama photos (equirectangular 踏勘全景) 
 
 Local web viewer for drone panos. This skill folder is the app repo; the app lives in `app/` (Vite + React) and shows a photo-sphere viewer with yaw/pitch/FOV overlay, title banner, and a DJI EXIF/XMP metadata panel.
 
+## Viewer overlays & measurement
+
+- **HUD** (top right): `yaw · pitch · fov · dist`, live at 10 Hz. `dist` is the flat-ground distance to the ground point at the **center reticle** (always-on crosshair): horizontal from the pano's XMP `RelativeAltitude` and the view pitch, with slant range in parentheses — meters rounded to 10 m, `> 5 km` past the cap, `—` when looking at/above the horizon or when altitude is missing. Ground is assumed flat at takeoff elevation; terrain relief degrades it, especially at shallow pitch.
+- **Copy button** (right end of the HUD): copies one measurement record — `<id> · cam <lat>,<lon> (<src>) · yaw … · pitch … · fov … · dist … (slant …) · tgt <lat>,<lon> ±<err> m`, plus ` · north+x.x°` when an offset is active. `tgt` is the view-center ground point computed by Vincenty direct on WGS84 from the pano's EXIF GPS (`<src>` = `RTK σ… m`, `GNSS ±3 m`, or `geohash ±20 m` fallback); `±err` is the live along-track estimate (pitch sensitivity + 1 m terrain + position σ). `tgt n/a` when no ground point or no position.
+- **North offset** (EXIF panel, "Viewer" group): typed/nudged degrees rotate the sphere (`sphereCorrection`) so a mis-stitched pano's bearings read true — compass, HUD yaw and `tgt` all follow natively. One app-wide value, persisted in `localStorage`; `?north=<deg>` in the URL selects it for the session (persisted only once the user changes it). Default `0` = assume north-aligned.
+
 ## File naming contract
 
 The viewer reads position and identity **from filenames** — nothing else:

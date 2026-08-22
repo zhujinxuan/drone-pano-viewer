@@ -5,6 +5,13 @@ import "@photo-sphere-viewer/core/index.css";
 import "@photo-sphere-viewer/compass-plugin/index.css";
 import type { PhotoEntry, PhotosManifest } from "./lib/types";
 import { formatDistanceHud, groundDistance } from "./lib/ground-distance";
+import { vincentyDirect } from "./lib/geodesy";
+import {
+  estimateErrorM,
+  formatCopyRecord,
+  positionSigmaM,
+  type CameraFix,
+} from "./lib/copy-record";
 import MetadataPanel from "./components/MetadataPanel";
 import NavStrip from "./components/NavStrip";
 
@@ -39,6 +46,17 @@ export default function App() {
   const [hud, setHud] = useState<HudState>({ yaw: 0, pitch: 0, fov: 90 });
   const [captureTime, setCaptureTime] = useState<string | null>(null);
   const [relAlt, setRelAlt] = useState<number | null>(null);
+  const [gpsFix, setGpsFix] = useState<CameraFix | null>(null);
+  const [copied, setCopied] = useState(false);
+  // App-wide north offset (ticket 02): ?north= > localStorage > 0.
+  const [northOffset, setNorthOffset] = useState<number>(() => {
+    const p = new URLSearchParams(window.location.search).get("north");
+    if (p !== null && Number.isFinite(Number(p))) return Number(p);
+    const s = window.localStorage.getItem("pano.northOffsetDeg");
+    return s !== null && Number.isFinite(Number(s)) ? Number(s) : 0;
+  });
+  // The viewer effect must read the offset without re-creating the viewer.
+  const northOffsetRef = useRef(northOffset);
   const [flash, setFlash] = useState<{ n: number; text: string } | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const viewerRef = useRef<Viewer | null>(null);
@@ -63,6 +81,7 @@ export default function App() {
   useEffect(() => {
     setCaptureTime(null);
     setRelAlt(null);
+    setGpsFix(null);
   }, [panoramaUrl]);
 
   useEffect(() => {
@@ -171,6 +190,64 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [panoramaUrl]);
 
+  // Persist + mirror into ?north in the change handler itself — a mount-time
+  // effect would make a one-off ?north= override silently overwrite the
+  // stored value (and is StrictMode-double-effect fragile).
+  const changeNorthOffset = useCallback((deg: number) => {
+    setNorthOffset(deg);
+    window.localStorage.setItem("pano.northOffsetDeg", String(deg));
+    const url = new URL(window.location.href);
+    if (deg === 0) url.searchParams.delete("north");
+    else url.searchParams.set("north", String(deg));
+    window.history.replaceState(null, "", url);
+  }, []);
+
+  // Apply the offset to the live sphere; construction covers pano switches.
+  useEffect(() => {
+    northOffsetRef.current = northOffset;
+    viewerRef.current?.setOption("sphereCorrection", {
+      pan: (northOffset * Math.PI) / 180,
+      tilt: 0,
+      roll: 0,
+    });
+  }, [northOffset]);
+
+  /** Copy the full measurement record (ticket 01) to the clipboard. */
+  const copyRecord = useCallback(() => {
+    if (current === null) return;
+    const g = groundDistance(relAlt, hud.pitch);
+    const fix: CameraFix | null =
+      gpsFix ??
+      (current.lon !== null && current.lat !== null
+        ? { lat: current.lat, lon: current.lon, source: "geohash" }
+        : null);
+    const target =
+      g !== null && fix !== null
+        ? vincentyDirect(fix.lat, fix.lon, hud.yaw * DEG, g.horizontal)
+        : null;
+    const line = formatCopyRecord({
+      id: current.id,
+      fix,
+      yawDeg: hud.yaw * DEG,
+      pitchDeg: hud.pitch * DEG,
+      fovDeg: hud.fov,
+      distText: formatDistanceHud(g),
+      target,
+      errorM:
+        g !== null && relAlt !== null && fix !== null
+          ? estimateErrorM(relAlt, hud.pitch, positionSigmaM(fix))
+          : null,
+      northOffsetDeg: northOffset,
+    });
+    navigator.clipboard.writeText(line).then(
+      () => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1000);
+      },
+      () => {},
+    );
+  }, [current, relAlt, hud, gpsFix, northOffset]);
+
   useEffect(() => {
     const container = containerRef.current;
     if (!container || panoramaUrl === null) return;
@@ -180,6 +257,7 @@ export default function App() {
       panorama: panoramaUrl,
       navbar: ["zoom", "move", "fullscreen"],
       keyboard: "always",
+      sphereCorrection: { pan: (northOffsetRef.current * Math.PI) / 180, tilt: 0, roll: 0 },
       plugins: [CompassPlugin.withConfig({ position: "bottom left", size: "110px" })],
     });
     viewerRef.current = viewer;
@@ -235,16 +313,29 @@ export default function App() {
         <div
           className="hud"
           aria-live="polite"
-          title="dist: flat-ground estimate from this pano's XMP RelativeAltitude (height above takeoff). Slopes and buildings degrade it, especially at shallow pitch."
+          title="dist: flat-ground estimate from this pano's XMP RelativeAltitude (height above takeoff). Slopes and buildings degrade it, especially at shallow pitch. Copy payload error model: ±(h·0.1°/sin²|pitch| + 1 m/tan|pitch| + position σ) along-track."
         >
-          yaw {(hud.yaw * DEG).toFixed(1)}° · pitch {(hud.pitch * DEG).toFixed(1)}° · fov{" "}
-          {hud.fov.toFixed(1)}° · dist {formatDistanceHud(groundDistance(relAlt, hud.pitch))}
+          <span>
+            yaw {(hud.yaw * DEG).toFixed(1)}° · pitch {(hud.pitch * DEG).toFixed(1)}° · fov{" "}
+            {hud.fov.toFixed(1)}° · dist {formatDistanceHud(groundDistance(relAlt, hud.pitch))}
+          </span>
+          <button
+            type="button"
+            className="hud-copy"
+            onClick={copyRecord}
+            title="Copy the full measurement record (camera · angles · dist · target WGS84 ±error)"
+          >
+            {copied ? "✓" : "copy"}
+          </button>
         </div>
         {panoramaUrl !== null && (
           <MetadataPanel
             imageUrl={panoramaUrl}
             onCaptureTime={setCaptureTime}
             onRelativeAltitude={setRelAlt}
+            onGpsFix={setGpsFix}
+            northOffset={northOffset}
+            onNorthOffsetChange={changeNorthOffset}
           />
         )}
         <NavStrip

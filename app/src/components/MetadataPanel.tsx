@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import exifr from "exifr";
+import type { CameraFix } from "../lib/copy-record";
 
 export interface MetadataPanelProps {
   imageUrl: string;
@@ -7,6 +8,11 @@ export interface MetadataPanelProps {
   onCaptureTime?: (iso: string | null) => void;
   /** Fires once per parse with drone-dji RelativeAltitude in meters, null when absent. */
   onRelativeAltitude?: (m: number | null) => void;
+  /** Fires once per parse with the camera GPS fix (EXIF/XMP lat/lon + RTK σ when present), null when absent. */
+  onGpsFix?: (fix: CameraFix | null) => void;
+  /** App-wide north offset in degrees (ticket 02); rendered as an editable row. */
+  northOffset: number;
+  onNorthOffsetChange: (deg: number) => void;
 }
 
 type Meta = Record<string, unknown>;
@@ -110,6 +116,22 @@ async function extractDjiXmp(url: string): Promise<Meta> {
 
 /* ---------- grouping ---------- */
 
+/**
+ * Camera position for the copy record: EXIF/XMP lat/lon, tagged `rtk` (with
+ * the worst of the RTK σ components) when the XMP carried `RtkStd*`, plain
+ * `gnss` otherwise. null when the file has no usable coordinates.
+ */
+function gpsFixFrom(m: Meta): CameraFix | null {
+  const lat = num(m.GpsLatitude ?? m.latitude);
+  const lon = num(m.GpsLongitude ?? m.longitude);
+  if (lat === null || lon === null) return null;
+  const stds = [num(m.RtkStdLat), num(m.RtkStdLon), num(m.RtkStdHgt)].filter(
+    (v): v is number => v !== null,
+  );
+  if (stds.length > 0) return { lat, lon, source: "rtk", rtkStd: Math.max(...stds) };
+  return { lat, lon, source: "gnss" };
+}
+
 interface Row {
   label: string;
   value: string | null;
@@ -210,9 +232,20 @@ const CSS = `
 .dji-mp-err{color:#f28b82}
 .dji-mp-tab{pointer-events:auto;position:absolute;top:50%;right:0;transform:translateY(-50%);writing-mode:vertical-rl;background:rgba(15,16,20,.9);color:#9aa0ab;border:1px solid rgba(255,255,255,.08);border-right:none;border-radius:8px 0 0 8px;padding:14px 5px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;cursor:pointer}
 .dji-mp-tab:hover{color:#e6e6ea}
+.dji-mp-north{display:flex;align-items:center;gap:3px}
+.dji-mp-north input{width:54px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);color:#e6e6ea;border-radius:4px;font:inherit;padding:1px 4px;text-align:right}
+.dji-mp-north button{background:none;border:1px solid rgba(255,255,255,.15);color:#9aa0ab;border-radius:4px;font:inherit;font-size:10px;padding:1px 4px;cursor:pointer}
+.dji-mp-north button:hover{color:#e6e6ea;border-color:rgba(255,255,255,.35)}
 `;
 
-export default function MetadataPanel({ imageUrl, onCaptureTime, onRelativeAltitude }: MetadataPanelProps) {
+export default function MetadataPanel({
+  imageUrl,
+  onCaptureTime,
+  onRelativeAltitude,
+  onGpsFix,
+  northOffset,
+  onNorthOffsetChange,
+}: MetadataPanelProps) {
   const [meta, setMeta] = useState<Meta | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -240,20 +273,25 @@ export default function MetadataPanel({ imageUrl, onCaptureTime, onRelativeAltit
         setError("No EXIF/XMP metadata found in this file.");
         onCaptureTime?.(null);
         onRelativeAltitude?.(null);
+        onGpsFix?.(null);
       } else {
         setMeta(m);
         onCaptureTime?.(str(m.UTCAtExposure) ?? stamp(m.DateTimeOriginal));
         onRelativeAltitude?.(num(m.RelativeAltitude));
+        onGpsFix?.(gpsFixFrom(m));
       }
       setLoading(false);
     })();
     return () => {
       cancelled = true;
     };
-  }, [imageUrl, onCaptureTime, onRelativeAltitude]);
+  }, [imageUrl, onCaptureTime, onRelativeAltitude, onGpsFix]);
 
   const groups = meta === null ? [] : buildGroups(meta);
   const fileName = decodeURIComponent(imageUrl.split("/").pop() ?? imageUrl);
+  /** Nudge buttons stay at 0.1° resolution even after repeated clicks. */
+  const nudgeOffset = (d: number) =>
+    onNorthOffsetChange(Math.round((northOffset + d) * 10) / 10);
 
   return (
     <div className="dji-mp-root">
@@ -279,6 +317,42 @@ export default function MetadataPanel({ imageUrl, onCaptureTime, onRelativeAltit
           </button>
         </div>
         <div className="dji-mp-body">
+          {/* App config, not photo metadata — always visible (ticket 02). */}
+          <section className="dji-mp-group" style={{ marginTop: 0 }}>
+            <div className="dji-mp-group-title">Viewer</div>
+            <div className="dji-mp-row">
+              <span className="dji-mp-l">North offset</span>
+              <span className="dji-mp-v dji-mp-north">
+                {[-1, -0.1].map((d) => (
+                  <button key={d} type="button" onClick={() => nudgeOffset(d)}>
+                    {d}
+                  </button>
+                ))}
+                <input
+                  type="number"
+                  step={0.1}
+                  value={northOffset}
+                  aria-label="North offset in degrees"
+                  onChange={(e) => {
+                    if (e.target.value.trim() === "") return;
+                    const v = Number(e.target.value);
+                    if (Number.isFinite(v)) onNorthOffsetChange(v);
+                  }}
+                  onBlur={(e) => {
+                    const v = Number(e.target.value);
+                    if (e.target.value.trim() !== "" && Number.isFinite(v)) {
+                      onNorthOffsetChange(Math.round(v * 10) / 10);
+                    }
+                  }}
+                />
+                {[0.1, 1].map((d) => (
+                  <button key={d} type="button" onClick={() => nudgeOffset(d)}>
+                    +{d}
+                  </button>
+                ))}
+              </span>
+            </div>
+          </section>
           {loading && <div className="dji-mp-note">Parsing metadata…</div>}
           {!loading && error !== null && <div className="dji-mp-note dji-mp-err">{error}</div>}
           {!loading && error === null && groups.length === 0 && (
