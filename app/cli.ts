@@ -20,7 +20,7 @@ import { scanPhotos, type PhotoEntry } from "./src/lib/scan.ts";
 const HELP = `pano — drone panorama viewer
 
   pano view <file-or-dir> [--id <geohash8>] [--near <lon,lat>] [--title <text>]
-                        [--playlist <file.json>]
+                        [--playlist <file.json>] [--annotations <file.geojson>]
       Serve the photos dir (a file argument serves its parent dir) and open
       the viewer in the default browser. Selection precedence:
         --id <geohash8>   exact photo by filename stem
@@ -33,6 +33,10 @@ const HELP = `pano — drone panorama viewer
                         the dir scan. Ids must exist in the scan. With a
                         playlist, --id/--near must resolve inside it and the
                         default selection is the first playlist entry.
+      --annotations <file.geojson>
+                        GeoJSON outbox for in-pano annotations. Relative
+                        paths resolve against the photos dir; default
+                        <dir>/annotations.geojson.
   pano list <dir> [--json]
       Print the photo manifest without starting a server.
 `;
@@ -181,6 +185,14 @@ async function runView(args: Args): Promise<void> {
   });
 
   process.env.PANO_PHOTOS_DIR = dir;
+  // Annotations outbox: default `<dir>/annotations.geojson`, or the flag
+  // (absolute wins; relative resolves against the photos dir), env-passed to
+  // the dev server middleware like PANO_PHOTOS_DIR.
+  const annotationsFlag = args.flags.annotations;
+  if (annotationsFlag !== undefined && !annotationsFlag) die("--annotations expects a <file.geojson> path");
+  process.env.PANO_ANNOTATIONS = annotationsFlag
+    ? path.resolve(dir, annotationsFlag)
+    : path.join(dir, "annotations.geojson");
 
   const { createServer } = await import("vite");
   const server = await createServer({

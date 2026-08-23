@@ -31,6 +31,7 @@ The viewer reads position and identity **from filenames** — nothing else:
    ```
    npm run pano -- view <file-or-dir> [--id <geohash8>] [--near <lon,lat>]
                        [--title <text>] [--playlist <file.json>]
+                       [--annotations <path>]
    npm run pano -- list <dir> [--json]
    ```
 
@@ -46,6 +47,36 @@ For "review these 10–20 spots" requests, write a playlist file yourself (title
 ```
 
 Pass it with `--playlist`; the viewer restricts to that ordered subset and the user switches with `[` / `]` (or `p` / `n`), wrap-around, bottom nav strip showing `‹ N/M ›` and the next title. Ids must exist in the dir — the CLI fails fast listing unknown ones. Viewer URLs carry `?pos=N`, so a refresh keeps the place.
+
+## Annotations
+
+Draw POI points, lines, polygons **on the pano** — captured from the reticle or clicks, labeled, deletable — persisted live (autosave debounced ~300 ms) to a single GeoJSON file: `<photos-dir>/annotations.geojson`, override with `pano view --annotations <path>`.
+
+**UI contract**:
+
+- **Mode rail** (top left): `point` / `line` / `polygon` buttons — exclusive; clicking the active mode's button or `Esc` exits.
+- **Add vertex**: `Space` at the reticle ground point, or a single click (drag-guarded) at the clicked ground point — same flat-ground projection as the copy record's `tgt`.
+- **Finish**: `Enter` — line needs ≥ 2 vertices, polygon ≥ 3 and auto-closes. `u` / `Backspace` undoes the last vertex; `Esc` cancels; switching photos discards the in-progress shape.
+- **Reject flash**: aim at/above the horizon → no ground point, vertex rejected with a brief red reticle flash (never silent).
+- **Label**: inline input on finish, auto-name pre-filled (`Point N` / `Line N` / `Polygon N`); `Enter` / `Esc` accepts. `l` re-opens it for the selected entity (bumps `updated`).
+- **List panel** (`e`): current photo's entities grouped by kind; click = select + camera swing to the entity centroid; `Tab` cycles selection. `Delete` / `d` = instant delete with a 5 s undo toast (restores the same id).
+- **Disabled** on `nogps-*` or missing-RelativeAltitude photos (mode buttons greyed out).
+
+**File contract** — one FeatureCollection, `version: 1`:
+
+- `properties`: `id` = `ann-<ULID>` (unique, k-sorted, never reused), `kind` = `point|line|polygon`, `label`, `photo` (pano id — the stable key), `photoTitle` (resolved at creation), `created` / `updated` (ISO 8601 UTC; `updated` bumps only on relabel — vertices are immutable post-finish), `cam` = `{ lat, lon, src, relAltM }` (camera fix at capture), `vertexErrM` (per-vertex along-track error, copy-record model).
+- Geometry is 2D `[lon, lat]` rounded to 7 decimals on write; polygon rings are written closed.
+- Load-then-rewrite of the **entire collection** on every mutation, atomic (`.tmp` + rename); lenient load preserves unknown members verbatim; features for photos outside the current playlist/session are never pruned.
+
+**Consumer contract** — the file is a durable outbox with monotonic `(id, updated)` versioning. **Read-only for consumers; the viewer is the sole writer.**
+
+- Upsert downstream by `properties.id`; skip when `updated` is unchanged since the last ingest.
+- Deletion = the feature vanishes from the file → prune downstream rows whose known id is absent.
+- The consumption receipt (e.g. an `ann_id` column in the GPKG) lives in the destination store, not the outbox.
+- "Layer" = filter by `properties.photo` (stable) or `properties.photoTitle` — GeoJSON has no native layers.
+- Atomic rename means no torn reads. Typical batch flow: the user labels a playlist of 10–20 photos, then the agent ingests that dir's file afterward.
+
+See `docs/adr/0002-annotations-outbox.md`.
 
 ## Caveats
 

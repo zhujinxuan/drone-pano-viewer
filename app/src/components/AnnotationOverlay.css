@@ -1,0 +1,59 @@
+/* Annotation overlay (ticket 04) — DOM labels projected over the pano.
+   The layer is display-only: pointer-events stay none so clicks pass
+   through to PSV (selection routes through the entity list panel).
+   Palette matches index.css (dark chip, #e6e6ea text); the left border
+   echoes each kind's 3D stroke color so DOM and scene agree. */
+
+.annotation-overlay {
+  position: absolute;
+  inset: 0;
+  /* Above the pano canvas, below HUD/panels (z-index 10 in index.css). */
+  z-index: 5;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.annotation-label {
+  position: absolute;
+  top: 0;
+  left: 0;
+  /* Off-stage until the first projection writes a real transform. */
+  transform: translate(-100px, -100px);
+  max-width: 220px;
+  padding: 2px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+  background: rgba(10, 10, 14, 0.72);
+  color: #e6e6ea;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-shadow: 0 1px 2px #000;
+}
+
+.annotation-label.is-hidden {
+  visibility: hidden;
+}
+
+.annotation-label.kind-point {
+  border-left: 3px solid #5ac8fa;
+}
+
+.annotation-label.kind-line {
+  border-left: 3px solid #ffc95e;
+}
+
+.annotation-label.kind-polygon {
+  border-left: 3px solid #6fe0a8;
+}
+
+/* Selection: glow + weight, never color alone (mirrors the 3D halo). */
+.annotation-label.selected {
+  border-color: rgba(255, 255, 255, 0.6);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.18);
+  color: #ffffff;
+  font-weight: 600;
+}

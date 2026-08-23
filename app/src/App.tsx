@@ -5,18 +5,31 @@ import "@photo-sphere-viewer/core/index.css";
 import "@photo-sphere-viewer/compass-plugin/index.css";
 import type { PhotoEntry, PhotosManifest } from "./lib/types";
 import { formatDistanceHud, groundDistance } from "./lib/ground-distance";
-import { vincentyDirect } from "./lib/geodesy";
+import { cameraSourceText, formatCopyRecord, type CameraFix } from "./lib/copy-record";
 import {
-  estimateErrorM,
-  formatCopyRecord,
-  positionSigmaM,
-  type CameraFix,
-} from "./lib/copy-record";
+  createEntity,
+  deleteEntity,
+  featureVertices,
+  forPhoto,
+  parseAnnotations,
+  relabelEntity,
+  serializeAnnotations,
+  type AnnCollection,
+  type AnnDraft,
+  type AnnFeature,
+  type AnnKind,
+} from "./lib/annotations";
+import { centroidView, groundTarget, type GroundCam } from "./lib/ground-capture";
 import MetadataPanel from "./components/MetadataPanel";
 import NavStrip from "./components/NavStrip";
+import AnnotationOverlay, { swingTo } from "./components/AnnotationOverlay";
+import AnnotationPanel from "./components/AnnotationPanel";
 
 const DEG = 180 / Math.PI;
 const FLASH_MS = 1250;
+/** Drag-guard for click-to-add: a click whose mousedown moved farther than
+ * this (px) was a look-around drag, not an add. */
+const CLICK_SLOP_PX = 6;
 
 interface HudState {
   yaw: number;
@@ -63,6 +76,26 @@ export default function App() {
   const zoomRef = useRef<number | null>(null);
   const flashSeq = useRef(0);
 
+  // --- Annotations (.scratch/annotations/spec.md) ---
+  // `anns` null = outbox not loaded → annotation disabled, never save (a
+  // failed load must never clobber the file with an empty rewrite).
+  const [anns, setAnns] = useState<AnnCollection | null>(null);
+  const annsRef = useRef<AnnCollection | null>(null);
+  const [mode, setMode] = useState<AnnKind | null>(null);
+  const [draftVerts, setDraftVerts] = useState<[number, number][]>([]);
+  const [draftErrs, setDraftErrs] = useState<number[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [deleted, setDeleted] = useState<{ feature: AnnFeature; index: number } | null>(null);
+  const [pendingLabelForId, setPendingLabelForId] = useState<string | null>(null);
+  const [panelOpen, setPanelOpen] = useState(true);
+  const [saveState, setSaveState] = useState<"saving" | "saved" | null>(null);
+  const [rejectActive, setRejectActive] = useState(false);
+  // The Viewer also lives in state so the overlay re-mounts per pano.
+  const [viewerObj, setViewerObj] = useState<Viewer | null>(null);
+  const hudRef = useRef(hud);
+  const saveTimer = useRef<number | null>(null);
+  const rejectTimer = useRef<number | null>(null);
+
   const [params] = useState(() => new URLSearchParams(window.location.search));
   const titleParam = params.get("title");
 
@@ -77,11 +110,41 @@ export default function App() {
     titleParam ?? current?.title ?? `${current?.id ?? ""}${timeText}`;
   const panoramaUrl = current?.url ?? null;
 
-  // Each pano carries its own EXIF capture time and XMP altitude.
+  // Camera fix for measurement + capture: XMP GPS when the panel has it,
+  // else the geohash8 stem fallback (same precedence as the copy record).
+  const camFix: CameraFix | null =
+    gpsFix ??
+    (current !== null && current.lon !== null && current.lat !== null
+      ? { lat: current.lat, lon: current.lon, source: "geohash" }
+      : null);
+  const groundCam: GroundCam | null =
+    camFix !== null && relAlt !== null && relAlt > 0 ? { ...camFix, relAltM: relAlt } : null;
+  // Annotation needs a loaded outbox, a camera position and an altitude.
+  const canAnnotate = current !== null && groundCam !== null && anns !== null;
+  const annCam: AnnDraft["cam"] | null =
+    groundCam === null
+      ? null
+      : {
+          lat: groundCam.lat,
+          lon: groundCam.lon,
+          src: cameraSourceText(groundCam),
+          relAltM: groundCam.relAltM,
+        };
+  const currentFeatures =
+    anns !== null && current !== null ? forPhoto(anns, current.id) : [];
+
+  // Each pano carries its own EXIF capture time and XMP altitude. A switch
+  // also discards the in-progress shape (spec §Small print) and the
+  // selection (entities are per-photo).
   useEffect(() => {
     setCaptureTime(null);
     setRelAlt(null);
     setGpsFix(null);
+    setDraftVerts([]);
+    setDraftErrs([]);
+    setSelectedId(null);
+    setPendingLabelForId(null);
+    setDeleted(null);
   }, [panoramaUrl]);
 
   useEffect(() => {
@@ -136,6 +199,28 @@ export default function App() {
     window.history.replaceState(null, "", url);
   }, [pos]);
 
+  // Boot-load the annotations outbox (spec §File contract: load-then-rewrite).
+  // On failure annotation stays disabled rather than risking a clobbering
+  // save over an unreadable file; the server already maps missing/corrupt
+  // files to an empty v1 collection.
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/annotations")
+      .then((r) =>
+        r.ok ? (r.json() as Promise<unknown>) : Promise.reject(new Error(`HTTP ${r.status}`)),
+      )
+      .then((json) => {
+        if (cancelled) return;
+        const c = parseAnnotations(json);
+        annsRef.current = c;
+        setAnns(c);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   /**
    * Switch panorama: remember the zoom level to re-apply after the new
    * viewer is ready (yaw/pitch reset to default), then move `pos` with
@@ -152,29 +237,8 @@ export default function App() {
     [photos],
   );
 
-  // `[` / `p` = previous, `]` / `n` = next. PSV owns arrows and +/-; these
-  // keys never collide. Skipped while loading or for single-photo manifests.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.ctrlKey || e.altKey || e.metaKey) return;
-      const t = e.target;
-      if (
-        t instanceof HTMLElement &&
-        (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)
-      ) {
-        return;
-      }
-      if (e.key === "]" || e.key === "n") {
-        e.preventDefault();
-        navigate(1);
-      } else if (e.key === "[" || e.key === "p") {
-        e.preventDefault();
-        navigate(-1);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [navigate]);
+  // (The single global keydown listener lives below the annotation ops —
+  //  it needs their callbacks; nav keys merged into it, ticket 07 item 4.)
 
   // Flash the new title large center-screen on every pano change, fading
   // out via CSS animation. Fires on `panoramaUrl` only — the EXIF capture
@@ -215,28 +279,16 @@ export default function App() {
   /** Copy the full measurement record (ticket 01) to the clipboard. */
   const copyRecord = useCallback(() => {
     if (current === null) return;
-    const g = groundDistance(relAlt, hud.pitch);
-    const fix: CameraFix | null =
-      gpsFix ??
-      (current.lon !== null && current.lat !== null
-        ? { lat: current.lat, lon: current.lon, source: "geohash" }
-        : null);
-    const target =
-      g !== null && fix !== null
-        ? vincentyDirect(fix.lat, fix.lon, hud.yaw * DEG, g.horizontal)
-        : null;
+    const t = groundTarget(groundCam, hud.yaw * DEG, hud.pitch * DEG);
     const line = formatCopyRecord({
       id: current.id,
-      fix,
+      fix: camFix,
       yawDeg: hud.yaw * DEG,
       pitchDeg: hud.pitch * DEG,
       fovDeg: hud.fov,
-      distText: formatDistanceHud(g),
-      target,
-      errorM:
-        g !== null && relAlt !== null && fix !== null
-          ? estimateErrorM(relAlt, hud.pitch, positionSigmaM(fix))
-          : null,
+      distText: formatDistanceHud(groundDistance(relAlt, hud.pitch)),
+      target: t,
+      errorM: t === null ? null : t.errM,
       northOffsetDeg: northOffset,
     });
     navigator.clipboard.writeText(line).then(
@@ -246,7 +298,229 @@ export default function App() {
       },
       () => {},
     );
-  }, [current, relAlt, hud, gpsFix, northOffset]);
+  }, [current, relAlt, hud, camFix, groundCam, northOffset]);
+
+  /** Debounced full-file autosave — every mutation rewrites the outbox
+   *  (spec §File contract; atomic on the server side). */
+  const scheduleSave = useCallback((next: AnnCollection) => {
+    setSaveState("saving");
+    if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => {
+      fetch("/api/annotations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: serializeAnnotations(next),
+      })
+        .then((r) => setSaveState(r.ok ? "saved" : null))
+        .catch(() => setSaveState(null));
+    }, 300);
+  }, []);
+
+  const mutateAnns = useCallback(
+    (next: AnnCollection) => {
+      annsRef.current = next;
+      setAnns(next);
+      scheduleSave(next);
+    },
+    [scheduleSave],
+  );
+
+  /** Red reticle flash (~400 ms) when the aim has no ground point. */
+  const flashReject = useCallback(() => {
+    setRejectActive(true);
+    if (rejectTimer.current !== null) window.clearTimeout(rejectTimer.current);
+    rejectTimer.current = window.setTimeout(() => setRejectActive(false), 400);
+  }, []);
+
+  /**
+   * Add a vertex at the aimed ground point (reticle yaw/pitch or a
+   * drag-guarded click). Point mode finishes immediately and opens the
+   * label input; line/polygon accumulate until Enter. No ground point →
+   * reject flash, no vertex (spec §Reject flash).
+   */
+  const addVertex = useCallback(
+    (yawDeg: number, pitchDeg: number) => {
+      const store = annsRef.current;
+      if (mode === null || groundCam === null || current === null || store === null || annCam === null)
+        return;
+      const t = groundTarget(groundCam, yawDeg, pitchDeg);
+      if (t === null) {
+        flashReject();
+        return;
+      }
+      if (mode === "point") {
+        const { collection, feature } = createEntity(store, {
+          kind: "point",
+          photo: current.id,
+          photoTitle: title,
+          cam: annCam,
+          vertices: [[t.lon, t.lat]],
+          vertexErrM: [t.errM],
+        });
+        mutateAnns(collection);
+        setSelectedId(feature.properties.id);
+        setPendingLabelForId(feature.properties.id);
+      } else {
+        setDraftVerts((v) => [...v, [t.lon, t.lat]]);
+        setDraftErrs((e) => [...e, t.errM]);
+      }
+    },
+    [mode, groundCam, current, title, annCam, mutateAnns, flashReject],
+  );
+  // The viewer's click listener (created per pano) calls through this ref.
+  const addVertexRef = useRef(addVertex);
+  useEffect(() => {
+    addVertexRef.current = addVertex;
+  });
+
+  const clearDraft = useCallback(() => {
+    setDraftVerts([]);
+    setDraftErrs([]);
+  }, []);
+
+  /** Enter: finish at ≥ min vertices → entity + label input; else cancel. */
+  const finishDraft = useCallback(() => {
+    if (mode !== "line" && mode !== "polygon") return;
+    const store = annsRef.current;
+    const min = mode === "line" ? 2 : 3;
+    if (
+      store !== null &&
+      current !== null &&
+      annCam !== null &&
+      draftVerts.length >= min
+    ) {
+      const { collection, feature } = createEntity(store, {
+        kind: mode,
+        photo: current.id,
+        photoTitle: title,
+        cam: annCam,
+        vertices: draftVerts,
+        vertexErrM: draftErrs,
+      });
+      mutateAnns(collection);
+      setSelectedId(feature.properties.id);
+      setPendingLabelForId(feature.properties.id);
+    }
+    clearDraft();
+  }, [mode, draftVerts, draftErrs, current, title, annCam, mutateAnns, clearDraft]);
+
+  const undoVertex = useCallback(() => {
+    setDraftVerts((v) => v.slice(0, -1));
+    setDraftErrs((e) => e.slice(0, -1));
+  }, []);
+
+  /** Instant delete + 5 s undo toast (spec §Delete). */
+  const deleteEntityById = useCallback(
+    (id: string) => {
+      const store = annsRef.current;
+      if (store === null) return;
+      const index = store.features.findIndex((f) => f.properties.id === id);
+      if (index < 0) return;
+      const feature = store.features[index];
+      mutateAnns(deleteEntity(store, id));
+      setDeleted({ feature, index });
+      if (selectedId === id) setSelectedId(null);
+      if (pendingLabelForId === id) setPendingLabelForId(null);
+    },
+    [mutateAnns, selectedId, pendingLabelForId],
+  );
+
+  /** Same-id restore — the consumer sees vanish-then-return; its upsert
+   *  handles resurrection (spec §Small print). */
+  const undoDelete = useCallback(() => {
+    const store = annsRef.current;
+    if (store === null || deleted === null) return;
+    const features = [...store.features];
+    features.splice(Math.min(deleted.index, features.length), 0, deleted.feature);
+    mutateAnns({ ...store, features });
+    setDeleted(null);
+  }, [deleted, mutateAnns]);
+
+  const handleLabelChange = useCallback(
+    (id: string, label: string) => {
+      const store = annsRef.current;
+      if (store === null) return;
+      mutateAnns(relabelEntity(store, id, label));
+      if (pendingLabelForId === id) setPendingLabelForId(null);
+    },
+    [mutateAnns, pendingLabelForId],
+  );
+
+  /** Swing the camera onto an entity without touching the selection. */
+  const lookAtFeature = useCallback(
+    (id: string) => {
+      const store = annsRef.current;
+      const viewer = viewerRef.current;
+      if (store === null || viewer === null || groundCam === null) return;
+      const f = store.features.find((x) => x.properties.id === id);
+      if (f === undefined) return;
+      const view = centroidView(groundCam, featureVertices(f));
+      if (view !== null) swingTo(viewer, view);
+    },
+    [groundCam],
+  );
+
+  /** List click: select + swing the camera onto the entity (spec §Q12). */
+  const selectAndSwing = useCallback(
+    (id: string) => {
+      setSelectedId(id);
+      lookAtFeature(id);
+    },
+    [lookAtFeature],
+  );
+
+  // The one global keydown listener: photo nav (`[`/`]`/`p`/`n`) plus the
+  // annotation keymap (spec §Capture & interaction / §Selection). Input
+  // targets are skipped, so label typing never draws or navigates. Space/Tab
+  // are preventDefaulted against scroll/focus moves; PSV owns arrows and
+  // +/-, none of these collide.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.altKey || e.metaKey) return;
+      const t = e.target;
+      if (
+        t instanceof HTMLElement &&
+        (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)
+      ) {
+        return;
+      }
+      if (e.key === "]" || e.key === "n") {
+        e.preventDefault();
+        navigate(1);
+      } else if (e.key === "[" || e.key === "p") {
+        e.preventDefault();
+        navigate(-1);
+      } else if (e.key === " " && mode !== null) {
+        e.preventDefault();
+        addVertexRef.current(hudRef.current.yaw * DEG, hudRef.current.pitch * DEG);
+      } else if (e.key === "Enter" && (mode === "line" || mode === "polygon")) {
+        e.preventDefault();
+        finishDraft();
+      } else if ((e.key === "u" || e.key === "Backspace") && draftVerts.length > 0) {
+        e.preventDefault();
+        undoVertex();
+      } else if (e.key === "Escape") {
+        if (draftVerts.length > 0) clearDraft();
+        else if (mode !== null) setMode(null);
+      } else if ((e.key === "Delete" || e.key === "d") && selectedId !== null) {
+        e.preventDefault();
+        deleteEntityById(selectedId);
+      } else if (e.key === "l" && selectedId !== null) {
+        setPendingLabelForId(selectedId);
+        setPanelOpen(true);
+      } else if (e.key === "Tab" && current !== null && annsRef.current !== null) {
+        const feats = forPhoto(annsRef.current, current.id);
+        if (feats.length === 0) return;
+        e.preventDefault();
+        const idx = feats.findIndex((f) => f.properties.id === selectedId);
+        setSelectedId(feats[(idx + 1) % feats.length].properties.id);
+      } else if (e.key === "e") {
+        setPanelOpen((o) => !o);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [navigate, mode, draftVerts.length, selectedId, current, finishDraft, undoVertex, clearDraft, deleteEntityById]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -261,6 +535,23 @@ export default function App() {
       plugins: [CompassPlugin.withConfig({ position: "bottom left", size: "110px" })],
     });
     viewerRef.current = viewer;
+    setViewerObj(viewer);
+
+    // Click-to-add vertex: fire only for genuine clicks — a drag that
+    // rotated the view is look-around, not an add (spec §Capture input).
+    let downX = 0;
+    let downY = 0;
+    const onDown = (ev: MouseEvent) => {
+      downX = ev.clientX;
+      downY = ev.clientY;
+    };
+    container.addEventListener("mousedown", onDown);
+    viewer.addEventListener("click", (ev) => {
+      const d = ev.data;
+      if (d.rightclick) return;
+      if (Math.hypot(d.clientX - downX, d.clientY - downY) > CLICK_SLOP_PX) return;
+      addVertexRef.current(d.yaw * DEG, d.pitch * DEG);
+    });
 
     // Live yaw/pitch/FOV overlay — events write into `latest`, a 10 Hz timer
     // pushes it into React state so drags don't trigger a render storm.
@@ -293,13 +584,17 @@ export default function App() {
       const now = performance.now();
       if (now - lastPush >= 100) {
         lastPush = now;
-        setHud({ ...latest });
+        const snap = { ...latest };
+        hudRef.current = snap;
+        setHud(snap);
       }
     }, 100);
 
     return () => {
       window.clearInterval(timer);
+      container.removeEventListener("mousedown", onDown);
       viewerRef.current = null;
+      setViewerObj(null);
       viewer.destroy();
     };
   }, [panoramaUrl, nextUrl]);
@@ -309,7 +604,9 @@ export default function App() {
       <div className="viewer-wrap">
         <div ref={containerRef} className="viewer" />
         {title !== "" && <div className="title-banner">{title}</div>}
-        {panoramaUrl !== null && <div className="reticle" aria-hidden="true" />}
+        {panoramaUrl !== null && (
+          <div className={rejectActive ? "reticle reject" : "reticle"} aria-hidden="true" />
+        )}
         <div
           className="hud"
           aria-live="polite"
@@ -327,6 +624,11 @@ export default function App() {
           >
             {copied ? "✓" : "copy"}
           </button>
+          {saveState !== null && (
+            <span className="ann-save" title="Annotations autosave">
+              {saveState === "saving" ? "saving…" : "saved ✓"}
+            </span>
+          )}
         </div>
         {panoramaUrl !== null && (
           <MetadataPanel
@@ -336,6 +638,58 @@ export default function App() {
             onGpsFix={setGpsFix}
             northOffset={northOffset}
             onNorthOffsetChange={changeNorthOffset}
+          />
+        )}
+        {viewerObj !== null && current !== null && (
+          <AnnotationOverlay
+            viewer={viewerObj}
+            cam={groundCam}
+            features={currentFeatures.map((f) => ({
+              id: f.properties.id,
+              kind: f.properties.kind,
+              label: f.properties.label,
+              vertices: featureVertices(f),
+            }))}
+            inProgress={
+              mode === "line" || mode === "polygon"
+                ? { kind: mode, vertices: draftVerts }
+                : null
+            }
+            selectedId={selectedId}
+          />
+        )}
+        {photos !== null && (
+          <AnnotationPanel
+            features={currentFeatures}
+            mode={mode}
+            onModeChange={(m) => {
+              setMode(m);
+              clearDraft();
+            }}
+            canAnnotate={canAnnotate}
+            inProgress={
+              mode === "line" || mode === "polygon"
+                ? { kind: mode, vertexCount: draftVerts.length }
+                : null
+            }
+            onFinish={finishDraft}
+            onUndoVertex={undoVertex}
+            selectedId={selectedId}
+            onSelect={selectAndSwing}
+            onLookAt={lookAtFeature}
+            onLabelChange={handleLabelChange}
+            onDelete={deleteEntityById}
+            toast={
+              deleted !== null
+                ? { id: deleted.feature.properties.id, label: deleted.feature.properties.label }
+                : null
+            }
+            onUndoDelete={undoDelete}
+            onDismissToast={() => setDeleted(null)}
+            pendingLabelForId={pendingLabelForId}
+            onPendingLabelDone={() => setPendingLabelForId(null)}
+            open={panelOpen}
+            onOpenChange={setPanelOpen}
           />
         )}
         <NavStrip

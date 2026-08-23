@@ -16,5 +16,5 @@
     "useDefineForClassFields": true,
     "types": ["node"]
   },
-  "include": ["src", "cli.ts", "vite.config.ts"]
+  "include": ["src", "cli.ts", "vite.config.ts", "annotations-endpoint.test.ts"]
 }

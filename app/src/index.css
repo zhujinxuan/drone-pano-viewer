@@ -120,6 +120,19 @@ body {
   transform: translateY(-50%);
 }
 
+/* Reject flash: the aim has no ground point (at/above horizon). */
+.reticle.reject::before,
+.reticle.reject::after {
+  background: rgba(255, 77, 77, 0.95);
+}
+
+/* Autosave indicator at the right end of the HUD. */
+.ann-save {
+  margin-left: 8px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.6);
+}
+
 /* Full-cover message states (fetch error / empty manifest / initial load). */
 .overlay-msg {
   position: absolute;

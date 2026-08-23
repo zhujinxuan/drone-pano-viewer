@@ -68,10 +68,15 @@ export function formatError(errM: number): string {
   return rounded >= 1000 ? ">1 km" : String(rounded);
 }
 
+/** Source tag alone — `RTK σ… m` / `GNSS ±3 m` / `geohash ±20 m`. The
+ *  annotation schema's `cam.src` stores this verbatim. */
+export function cameraSourceText(fix: CameraFix): string {
+  if (fix.source === "rtk") return `RTK σ${(fix.rtkStd ?? 3).toFixed(2)} m`;
+  return fix.source === "gnss" ? "GNSS ±3 m" : "geohash ±20 m";
+}
+
 function camText(fix: CameraFix): string {
-  const pos = `${fix.lat.toFixed(5)},${fix.lon.toFixed(5)}`;
-  if (fix.source === "rtk") return `${pos} (RTK σ${(fix.rtkStd ?? 3).toFixed(2)} m)`;
-  return `${pos} (${fix.source === "gnss" ? "GNSS ±3 m" : "geohash ±20 m"})`;
+  return `${fix.lat.toFixed(5)},${fix.lon.toFixed(5)} (${cameraSourceText(fix)})`;
 }
 
 /**
