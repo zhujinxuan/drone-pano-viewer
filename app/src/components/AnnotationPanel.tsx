@@ -245,6 +245,21 @@ export default function AnnotationPanel({
    * input (Esc accepts as-is, spec §Labels) from a manual row edit (Esc cancels). */
   const [editing, setEditing] = useState<{ id: string; escCommits: boolean } | null>(null);
   const [editValue, setEditValue] = useState("");
+  const editInputRef = useRef<HTMLInputElement | null>(null);
+
+  /* Focus + select-all ONCE per edit session (typing replaces the auto-name).
+   * Must not live in the input's ref callback: an inline ref gets a fresh
+   * identity every render, so React re-invokes it after each keystroke and
+   * select() re-selects the whole text — the next character replaces it
+   * again and the input can never hold more than one character. */
+  useEffect(() => {
+    if (editing === null) return;
+    const el = editInputRef.current;
+    if (el !== null) {
+      el.focus();
+      el.select();
+    }
+  }, [editing]);
 
   /** Latest dismiss callback for the countdown timer (identity-stable effect). */
   const dismissRef = useRef(onDismissToast);
@@ -410,13 +425,7 @@ export default function AnnotationPanel({
                             className="ann-pnl-input"
                             value={editValue}
                             spellCheck={false}
-                            // Focus + select-all on mount so typing replaces the auto-name.
-                            ref={(el) => {
-                              if (el !== null) {
-                                el.focus();
-                                el.select();
-                              }
-                            }}
+                            ref={editInputRef}
                             onChange={(e) => setEditValue(e.target.value)}
                             onKeyDown={onInputKeyDown}
                             onBlur={commitEdit}
