@@ -27,6 +27,13 @@ import AnnotationPanel from "./components/AnnotationPanel";
 
 const DEG = 180 / Math.PI;
 const FLASH_MS = 1250;
+
+declare global {
+  interface Window {
+    /** Live PSV viewer, exposed for debugging/e2e probes. */
+    __psv?: Viewer;
+  }
+}
 /** Drag-guard for click-to-add: a click whose mousedown moved farther than
  * this (px) was a look-around drag, not an add. */
 const CLICK_SLOP_PX = 6;
@@ -536,6 +543,7 @@ export default function App() {
     });
     viewerRef.current = viewer;
     setViewerObj(viewer);
+    window.__psv = viewer;
 
     // Click-to-add vertex: fire only for genuine clicks — a drag that
     // rotated the view is look-around, not an add (spec §Capture input).

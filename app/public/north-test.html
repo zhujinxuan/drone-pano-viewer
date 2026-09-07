@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="/@fs/C:/Users/zhu_j/.agents/skills/drone-pano-viewer/app/node_modules/@photo-sphere-viewer/core/index.css">
+  <style>html,body{margin:0;height:100%}#v{width:100vw;height:100vh}</style>
+</head>
+<body>
+<div id="v"></div>
+<script type="module">
+  import { Viewer } from '/@fs/C:/Users/zhu_j/.agents/skills/drone-pano-viewer/app/node_modules/@photo-sphere-viewer/core/index.module.js';
+  const panDeg = Number(new URLSearchParams(location.search).get('pan') || '0');
+  new Viewer({
+    container: document.getElementById('v'),
+    panorama: '/photos/2026-07-27/wzbjvcq1.jpg',
+    sphereCorrection: { pan: panDeg * Math.PI / 180, tilt: 0, roll: 0 },
+  });
+  window.__pan = panDeg;
+</script>
+</body>
+</html>
