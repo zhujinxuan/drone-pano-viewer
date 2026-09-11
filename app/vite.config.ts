@@ -2,7 +2,16 @@ import fs from "node:fs";
 import path from "node:path";
 import react from "@vitejs/plugin-react";
 import { defineConfig, type Plugin } from "vite";
+import type { LonLat } from "./src/lib/geohash.ts";
 import { applyPlaylist, parsePlaylist } from "./src/lib/playlist.ts";
+import {
+  circlesFromPhotos,
+  filterByCircleUnion,
+  parseReferenceGeoJSON,
+  type RefFeature,
+  type RefLayerPayload,
+  type RefLayerSpec,
+} from "./src/lib/reference-layers.ts";
 import { scanPhotos } from "./src/lib/scan.ts";
 import type { PhotosManifest } from "./src/lib/types.ts";
 
@@ -192,6 +201,89 @@ export function panoAnnotations(): Plugin {
   };
 }
 
+/**
+ * Dev-server middleware exposing the read-only reference layers.
+ * Layer specs arrive via `PANO_REFERENCE_LAYERS` (JSON array set by cli.ts:
+ * [{ name, path, color, labelProp }]) — same flow as the other PANO_* vars.
+ *
+ *  - GET /api/reference-layers → { layers: [{ name, color, labelProp,
+ *    status, features }] }. Each file is read per request (file watching and
+ *    its status transitions land in ticket 02) and its features are
+ *    whole-included by the union of 1 km circles around every positioned pano
+ *    of the served dir — the full scan, not the playlist (a playlist is a
+ *    review restriction, not a data extent). No clipping: features pass
+ *    through verbatim.
+ *  - status: "ok" (parsed) | "missing" (file absent) | "invalid" (unreadable
+ *    or not recognizable GeoJSON). Never 500s — a broken layer degrades to an
+ *    empty FeatureCollection with a warning, like the annotations outbox.
+ *  - No PANO_REFERENCE_LAYERS (plain `vite dev`) → { layers: [] }.
+ */
+export function panoReferenceLayers(): Plugin {
+  return {
+    name: "pano-reference-layers",
+    configureServer(server) {
+      server.middlewares.use("/api/reference-layers", (_req, res) => {
+        res.setHeader("Content-Type", "application/json; charset=utf-8");
+        const raw = process.env.PANO_REFERENCE_LAYERS;
+        if (!raw) {
+          res.end(JSON.stringify({ layers: [] }));
+          return;
+        }
+        let specs: unknown;
+        try {
+          specs = JSON.parse(raw);
+        } catch (e) {
+          console.warn(`pano: PANO_REFERENCE_LAYERS is not valid JSON — serving no layers (${(e as Error).message})`);
+          res.end(JSON.stringify({ layers: [] }));
+          return;
+        }
+        if (!Array.isArray(specs)) {
+          console.warn("pano: PANO_REFERENCE_LAYERS is not a JSON array — serving no layers");
+          res.end(JSON.stringify({ layers: [] }));
+          return;
+        }
+        // Circle union over the full dir scan, rescanned per request so newly
+        // pulled DVC panos widen the prefilter on refresh (like /api/photos).
+        const photosDir = process.env.PANO_PHOTOS_DIR;
+        const circles: LonLat[] = photosDir ? circlesFromPhotos(scanPhotos(photosDir)) : [];
+        const layers: RefLayerPayload[] = [];
+        for (const entry of specs) {
+          const spec = entry as Partial<RefLayerSpec> | null;
+          if (typeof spec?.name !== "string" || typeof spec?.path !== "string") {
+            console.warn("pano: skipping malformed PANO_REFERENCE_LAYERS entry");
+            continue;
+          }
+          layers.push(loadLayer(spec as RefLayerSpec, circles));
+        }
+        res.end(JSON.stringify({ layers }));
+      });
+    },
+  };
+}
+
+function loadLayer(spec: RefLayerSpec, circles: readonly LonLat[]): RefLayerPayload {
+  let status: RefLayerPayload["status"];
+  let features: RefFeature[] = [];
+  try {
+    const loaded = parseReferenceGeoJSON(JSON.parse(fs.readFileSync(spec.path, "utf8")));
+    status = loaded.status;
+    features = loaded.features;
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    status = err.code === "ENOENT" ? "missing" : "invalid";
+    if (status === "invalid") {
+      console.warn(`pano: reference layer "${spec.name}" unreadable/corrupt — serving empty (${err.message})`);
+    }
+  }
+  return {
+    name: spec.name,
+    color: spec.color,
+    labelProp: spec.labelProp ?? null,
+    status,
+    features: { type: "FeatureCollection", features: filterByCircleUnion(features, circles) },
+  };
+}
+
 export default defineConfig({
-  plugins: [react(), panoPhotos(), panoAnnotations()],
+  plugins: [react(), panoPhotos(), panoAnnotations(), panoReferenceLayers()],
 });

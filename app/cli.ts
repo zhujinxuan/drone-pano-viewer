@@ -15,12 +15,14 @@ import path from "node:path";
 import open from "open";
 import { haversineKm, type LonLat } from "./src/lib/geohash.ts";
 import { applyPlaylist, parsePlaylist, type PlaylistEntry } from "./src/lib/playlist.ts";
+import { parseLayerSpecs, type RefLayerSpec } from "./src/lib/reference-layers.ts";
 import { scanPhotos, type PhotoEntry } from "./src/lib/scan.ts";
 
 const HELP = `pano — drone panorama viewer
 
   pano view <file-or-dir> [--id <geohash8>] [--near <lon,lat>] [--title <text>]
-                        [--playlist <file.json>] [--annotations <file.geojson>]
+                          [--playlist <file.json>] [--annotations <file.geojson>]
+                          [--layer <name>=<path.geojson>[,#hex][,label=<prop>]]…
       Serve the photos dir (a file argument serves its parent dir) and open
       the viewer in the default browser. Selection precedence:
         --id <geohash8>   exact photo by filename stem
@@ -37,6 +39,13 @@ const HELP = `pano — drone panorama viewer
                         GeoJSON outbox for in-pano annotations. Relative
                         paths resolve against the photos dir; default
                         <dir>/annotations.geojson.
+      --layer <name>=<path.geojson>[,#hex][,label=<prop>]
+                        Read-only reference overlay layer (repeatable):
+                        GeoJSON produced by outside tools (QGIS, scripts),
+                        absolute or CWD-relative. A missing file warns and
+                        serves empty. #hex overrides the default Okabe-Ito
+                        colorblind-safe palette (assigned by flag order);
+                        label=<prop> keys point-marker labels.
   pano list <dir> [--json]
       Print the photo manifest without starting a server.
 `;
@@ -45,10 +54,13 @@ interface Args {
   cmd: string;
   pos: string[];
   flags: Record<string, string>;
+  /** Repeatable --layer values, in flag order. */
+  layers: string[];
 }
 
 function parseArgs(argv: string[]): Args {
   const flags: Record<string, string> = {};
+  const layers: string[] = [];
   const pos: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -59,7 +71,12 @@ function parseArgs(argv: string[]): Args {
     if (a.startsWith("--")) {
       const key = a.slice(2);
       const next = argv[i + 1];
-      if (next !== undefined && !next.startsWith("--")) {
+      const hasValue = next !== undefined && !next.startsWith("--");
+      if (key === "layer") {
+        // repeatable flag: collect every occurrence, in flag order
+        if (hasValue) i++;
+        layers.push(hasValue ? next : "");
+      } else if (hasValue) {
         flags[key] = next;
         i++;
       } else {
@@ -69,7 +86,7 @@ function parseArgs(argv: string[]): Args {
       pos.push(a);
     }
   }
-  return { cmd: pos[0] ?? "", pos: pos.slice(1), flags };
+  return { cmd: pos[0] ?? "", pos: pos.slice(1), flags, layers };
 }
 
 function die(msg: string): never {
@@ -194,6 +211,22 @@ async function runView(args: Args): Promise<void> {
     ? path.resolve(dir, annotationsFlag)
     : path.join(dir, "annotations.geojson");
 
+  // Reference layers: repeatable --layer flags, parsed fail-fast, handed to
+  // the dev server as JSON via PANO_REFERENCE_LAYERS (like the other PANO_*
+  // vars). Paths are absolute or CWD-relative. A missing file warns — it may
+  // appear later (watch semantics land in ticket 02) — and serves empty.
+  let layers: RefLayerSpec[];
+  try {
+    layers = parseLayerSpecs(args.layers).map((l) => ({ ...l, path: path.resolve(l.path) }));
+  } catch (e) {
+    die((e as Error).message); // usage-shaped message from the lib
+  }
+  for (const l of layers) {
+    if (!fs.existsSync(l.path)) {
+      console.warn(`pano: reference layer "${l.name}" file not found: ${l.path} (serving empty; it may appear later)`);
+    }
+  }
+  process.env.PANO_REFERENCE_LAYERS = JSON.stringify(layers);
   const { createServer } = await import("vite");
   const server = await createServer({
     root: import.meta.dirname,
@@ -213,6 +246,10 @@ async function runView(args: Args): Promise<void> {
   open(url, { wait: false }).catch(() =>
     console.error("pano: failed to open the browser — open the URL above manually"),
   );
+
+  if (layers.length > 0) {
+    console.log(`pano: reference layers: ${layers.map((l) => `${l.name} (${l.color})`).join(", ")}`);
+  }
 
   // Serve until Ctrl+C.
   await new Promise<never>(() => {});
