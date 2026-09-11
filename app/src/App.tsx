@@ -21,9 +21,11 @@ import {
 } from "./lib/annotations";
 import { centroidView, groundTarget, type GroundCam } from "./lib/ground-capture";
 import type { RefLayerPayload } from "./lib/reference-layers";
+import type { InspectHit } from "./lib/reference-inspect";
 import { formatMeasureChip, measureBetween, type MeasurePoint } from "./lib/measure";
 import MeasureOverlay from "./components/MeasureOverlay";
 import ReferenceOverlay from "./components/ReferenceOverlay";
+import LayerToolbar, { InspectReadout } from "./components/LayerToolbar";
 import MetadataPanel from "./components/MetadataPanel";
 import NavStrip from "./components/NavStrip";
 import AnnotationOverlay, { swingTo } from "./components/AnnotationOverlay";
@@ -124,6 +126,11 @@ export default function App() {
   // Visibility per layer name, all-true on load — ticket 04's toolbar is
   // the only writer; the overlay reads it (absent name = visible).
   const [layerVisible, setLayerVisible] = useState<Record<string, boolean>>({});
+  // Click-inspect readout (ticket 04): the hit under the last idle-mode
+  // click, or null. Cleared by Esc / click-elsewhere (the overlay reports
+  // a miss as null) and on pano switch — the hit's feature may be culled
+  // or hidden in the next photo's view.
+  const [inspect, setInspect] = useState<InspectHit | null>(null);
 
   const [params] = useState(() => new URLSearchParams(window.location.search));
   const titleParam = params.get("title");
@@ -189,6 +196,8 @@ export default function App() {
     setDeleted(null);
     setMeasureA(null);
     setMeasureB(null);
+    // The inspected feature may be culled/hidden in the next pano's view.
+    setInspect(null);
   }, [panoramaUrl]);
 
   useEffect(() => {
@@ -496,6 +505,7 @@ export default function App() {
       if (m !== null) {
         setMeasureOn(false);
         clearMeasure();
+        setInspect(null);
       }
     },
     [clearDraft, clearMeasure],
@@ -508,7 +518,24 @@ export default function App() {
     setMode(null);
     clearDraft();
     clearMeasure();
+    setInspect(null);
   }, [clearDraft, clearMeasure]);
+
+  // --- Reference-layer toolbar + click-inspect (ticket 04) ---
+
+  /** Toolbar checkbox: flip one layer's visibility (absent = visible). */
+  const toggleLayerVisible = useCallback((name: string) => {
+    setLayerVisible((v) => ({ ...v, [name]: !(v[name] ?? true) }));
+  }, []);
+
+  /** Inspect sink: a hit opens/replaces the readout, a miss (null) closes
+   *  it — the overlay only reports while idle, so this never races a
+   *  capture mode. */
+  const handleInspect = useCallback((hit: InspectHit | null) => setInspect(hit), []);
+  // Reference clicks may inspect ONLY in idle mode — never steal from
+  // annotation vertex capture or measure capture (the overlay unmounts its
+  // click listener entirely while this is null).
+  const onRefInspect = mode === null && !measureOn ? handleInspect : null;
 
   /** Enter: finish at ≥ min vertices → entity + label input; else cancel. */
   const finishDraft = useCallback(() => {
@@ -636,6 +663,7 @@ export default function App() {
         else if (measureA !== null) clearMeasure();
         else if (mode !== null) setMode(null);
         else if (measureOn) setMeasureOn(false);
+        else if (inspect !== null) setInspect(null);
       } else if ((e.key === "Delete" || e.key === "d") && selectedId !== null) {
         e.preventDefault();
         deleteEntityById(selectedId);
@@ -654,7 +682,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [navigate, mode, measureOn, measureA, draftVerts.length, selectedId, current, finishDraft, undoVertex, clearDraft, clearMeasure, deleteEntityById]);
+  }, [navigate, mode, measureOn, measureA, draftVerts.length, selectedId, current, finishDraft, undoVertex, clearDraft, clearMeasure, deleteEntityById, inspect]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -799,8 +827,17 @@ export default function App() {
             cam={groundCam}
             layers={refLayers ?? []}
             visible={layerVisible}
+            onInspect={onRefInspect}
           />
         )}
+        {refLayers !== null && refLayers.length > 0 && (
+          <LayerToolbar
+            layers={refLayers}
+            visible={layerVisible}
+            onToggleVisible={toggleLayerVisible}
+          />
+        )}
+        {inspect !== null && <InspectReadout hit={inspect} onClose={() => setInspect(null)} />}
         {viewerObj !== null && current !== null && measureOn && (
           <MeasureOverlay
             viewer={viewerObj}

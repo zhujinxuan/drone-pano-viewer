@@ -1,0 +1,206 @@
+/* LayerToolbar (reference-layers ticket 04) — foldable + draggable floating
+   panel over the pano, and the click-inspect readout. House chrome like the
+   annotation panel: dark blurred panel, #9aa0ab uppercase title, #e6e6ea
+   rows. The header is the drag handle (pointer capture, touch-action none);
+   position + fold persist in localStorage from the component. */
+
+.lt-root {
+  position: absolute;
+  z-index: 16;
+  min-width: 216px;
+  max-width: 268px;
+  background: rgba(15, 16, 20, 0.93);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+}
+
+.lt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 8px 8px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+.lt-head:active {
+  cursor: grabbing;
+}
+
+.lt-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #9aa0ab;
+}
+
+.lt-fold,
+.lt-ro-x {
+  background: none;
+  border: none;
+  color: #9aa0ab;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 3px 6px;
+  border-radius: 4px;
+}
+
+.lt-fold:hover,
+.lt-ro-x:hover {
+  color: #e6e6ea;
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.lt-body {
+  max-height: min(50vh, 420px);
+  overflow-y: auto;
+  padding: 3px 0 7px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+.lt-body::-webkit-scrollbar {
+  width: 6px;
+}
+
+.lt-body::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 3px;
+}
+
+.lt-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4.5px 10px 4.5px 12px;
+  font-size: 12px;
+  color: #e6e6ea;
+  cursor: pointer;
+}
+
+.lt-row:hover {
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.lt-row input[type="checkbox"] {
+  flex: none;
+  margin: 0;
+  accent-color: #8ab4f8;
+  cursor: pointer;
+}
+
+.lt-swatch {
+  width: 10px;
+  height: 10px;
+  flex: none;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 3px;
+}
+
+.lt-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lt-warn {
+  flex: none;
+  color: #fdd663;
+  font-size: 12px;
+  line-height: 1;
+  cursor: help;
+}
+
+.lt-count {
+  flex: none;
+  font-size: 10px;
+  color: #6b7078;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- click-inspect readout: bottom-left, clear of the 110px compass ---- */
+
+.lt-readout {
+  position: absolute;
+  left: 140px;
+  bottom: 16px;
+  z-index: 16;
+  width: 300px;
+  max-width: calc(100vw - 160px);
+  max-height: 40vh;
+  overflow-y: auto;
+  background: rgba(15, 16, 20, 0.93);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+.lt-ro-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.lt-ro-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #9aa0ab;
+}
+
+.lt-ro-empty {
+  padding: 12px 14px;
+  font-size: 11.5px;
+  color: #9aa0ab;
+}
+
+.lt-ro-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+}
+
+.lt-ro-table th,
+.lt-ro-table td {
+  padding: 3px 14px 3px 0;
+  text-align: left;
+  vertical-align: top;
+}
+
+.lt-ro-table th {
+  padding-left: 14px;
+  color: #9aa0ab;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.lt-ro-table td {
+  color: #e6e6ea;
+  word-break: break-word;
+}
+
+.lt-ro-table tr:hover th,
+.lt-ro-table tr:hover td {
+  background: rgba(255, 255, 255, 0.045);
+}
