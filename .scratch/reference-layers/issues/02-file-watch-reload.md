@@ -4,15 +4,17 @@
 
 **Blocked by:** 01 — CLI layer flags + endpoint.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `server.watcher.add` per layer path in configureServer; 300 ms debounce per file
-- [ ] Re-read + re-filter on change; state change → `server.ws.send("reference-layers:changed")` (no payload)
-- [ ] Parse failure → one retry after 300 ms → still bad: keep last-good features, `status: "invalid"`
-- [ ] File deleted → empty FeatureCollection, `status: "missing"`
-- [ ] Successful parse → full replace, `status: "ok"`
-- [ ] Verified by scripted file edits against a running programmatic server (edit → endpoint reflects; corrupt → last good + invalid; delete → missing; restore → ok)
+- [x] `server.watcher.add` per layer path in configureServer; 300 ms debounce per file
+- [x] Re-read + re-filter on change; state change → `server.ws.send("reference-layers:changed")` (no payload)
+- [x] Parse failure → one retry after 300 ms → still bad: keep last-good features, `status: "invalid"`
+- [x] File deleted → empty FeatureCollection, `status: "missing"`
+- [x] Successful parse → full replace, `status: "ok"`
+- [x] Verified by scripted file edits against a running programmatic server (edit → endpoint reflects; corrupt → last good + invalid; delete → missing; restore → ok)
 
 ## Comments
 
 Spec: `.scratch/reference-layers/spec.md` §Watch semantics.
+
+Implemented 2026-09-11. 50 tests green + scripted e2e vs real createServer/chokidar (edit→346ms, corrupt→last-good+invalid 612ms, unlink→missing 422ms, restore→ok 337ms; one ws send per accepted transition). Code review (Standards+Spec): pass; accepted risks recorded — no watcher-teardown hook (300ms window, process exit reaps), chokidar path-normalization echo assumed (guarded by byPath), prefilter circles now boot/reload-cached (newly pulled panos widen the union on the next layer-file change, not on plain refresh).

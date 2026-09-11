@@ -1,6 +1,8 @@
 /**
  * Pure reference-layer model: repeatable `--layer` CLI flag parsing, lenient
- * GeoJSON load, and the 1 km circle-union prefilter.
+ * GeoJSON load, the 1 km circle-union prefilter, and the per-file watch
+ * state machine (debounce/retry/last-good transitions live here; the fs,
+ * timer, and ws wiring lives in vite.config.ts).
  *
  * Spec: .scratch/reference-layers/spec.md, ticket 01. Reference layers are
  * externally-owned, read-only overlays (turbine foundations, avoidance areas)
@@ -303,4 +305,94 @@ export interface RefLayerPayload {
   labelProp: string | null;
   status: "ok" | "invalid" | "missing";
   features: { type: "FeatureCollection"; features: RefFeature[] };
+}
+
+// ---- Watch state machine (ticket 02) ----------------------------------------
+
+/**
+ * One fs attempt at a layer file, produced by the vite wiring: parsed
+ * features, an absent file, or an unreadable/corrupt one. `message` rides
+ * along for the wiring's console.warn — the machine never looks at it.
+ */
+export type RefFileProbe =
+  | { read: "ok"; features: RefFeature[] }
+  | { read: "missing" }
+  | { read: "error"; message: string };
+
+/** Watch state of one layer: the last accepted payload plus its retry budget. */
+export interface RefLayerState {
+  payload: RefLayerPayload;
+  /**
+   * A 300 ms re-probe is pending after a failed probe, so the next error is
+   * terminal. Cleared by every accepted probe; re-armed by each new failure.
+   */
+  retryPending: boolean;
+}
+
+/** One machine step: the next state plus what the wiring should do about it. */
+export interface RefLayerTransition {
+  state: RefLayerState;
+  /** The served payload (status or filtered features) changed → ws.send. */
+  changed: boolean;
+  /** Terminal parse failure → the wiring warns (features are last-good). */
+  invalid: boolean;
+}
+
+/**
+ * Seed a layer's watch state. The payload is a neutral placeholder that no
+ * request ever sees — the boot load probes every layer synchronously before
+ * the endpoint can answer.
+ */
+export function createLayerState(spec: RefLayerSpec): RefLayerState {
+  return {
+    payload: {
+      name: spec.name,
+      color: spec.color,
+      labelProp: spec.labelProp ?? null,
+      status: "missing",
+      features: { type: "FeatureCollection", features: [] },
+    },
+    retryPending: false,
+  };
+}
+
+/**
+ * Fold one file probe into the watch state (spec §Watch semantics):
+ *
+ *  - ok      → full replace, status "ok", whole-included by the circle union.
+ *  - missing → empty features, status "missing".
+ *  - error   → first failure of an episode defers (payload untouched — the
+ *    last good keeps rendering and nothing is emitted) and asks for its one
+ *    300 ms retry; the retry failing too, or any error while a retry is
+ *    pending, is terminal: status "invalid" with the last-good features kept.
+ *
+ * `changed` compares status + filtered features, so a rewrite that alters
+ * neither emits nothing (key-order-sensitive — a reorder-only rewrite may
+ * push once; the refetch is idempotent, so benign).
+ */
+export function acceptLayerProbe(
+  prev: RefLayerState,
+  probe: RefFileProbe,
+  circles: readonly LonLat[],
+): RefLayerTransition {
+  if (probe.read === "error") {
+    if (!prev.retryPending) {
+      return { state: { payload: prev.payload, retryPending: true }, changed: false, invalid: false };
+    }
+    const payload = { ...prev.payload, status: "invalid" as const };
+    const changed =
+      prev.payload.status !== payload.status ||
+      JSON.stringify(prev.payload.features) !== JSON.stringify(payload.features);
+    return { state: { payload, retryPending: false }, changed, invalid: true };
+  }
+  const features = probe.read === "ok" ? filterByCircleUnion(probe.features, circles) : [];
+  const payload = {
+    ...prev.payload,
+    status: (probe.read === "ok" ? "ok" : "missing") as RefLayerPayload["status"],
+    features: { type: "FeatureCollection" as const, features },
+  };
+  const changed =
+    prev.payload.status !== payload.status ||
+    JSON.stringify(prev.payload.features) !== JSON.stringify(payload.features);
+  return { state: { payload, retryPending: false }, changed, invalid: false };
 }

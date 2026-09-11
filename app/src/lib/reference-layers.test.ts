@@ -7,12 +7,16 @@ import type { ViteDevServer } from "vite";
 import { vincentyDirect } from "./geodesy.ts";
 import {
   OKABE_ITO,
+  acceptLayerProbe,
   circlesFromPhotos,
+  createLayerState,
   filterByCircleUnion,
   parseLayerSpecs,
   parseReferenceGeoJSON,
   type RefFeature,
+  type RefLayerPayload,
   type RefLayerSpec,
+  type RefLayerState,
 } from "./reference-layers.ts";
 import { panoReferenceLayers } from "../../vite.config.ts";
 import type { PhotoEntry } from "./types.ts";
@@ -322,9 +326,126 @@ describe("filterByCircleUnion", () => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /api/reference-layers — the vite middleware, exercised like
+// Watch state machine (ticket 02) — createLayerState/acceptLayerProbe are the
+// pure core the vite wiring drives: probes come from fs reads, the machine
+// decides payload + retry + changed. Spec §Watch semantics.
+
+const WATCH_SPEC: RefLayerSpec = { name: "a", path: "a.geojson", color: "#e69f00", labelProp: null };
+
+const nearPt: RefFeature = {
+  type: "Feature",
+  geometry: { type: "Point", coordinates: [LON, LAT] },
+  properties: { tid: "T1" },
+};
+const nearPtB: RefFeature = {
+  type: "Feature",
+  geometry: { type: "Point", coordinates: at(90, 50) },
+  properties: { tid: "T3" },
+};
+const farPt: RefFeature = {
+  type: "Feature",
+  geometry: { type: "Point", coordinates: at(0, 5000) },
+  properties: { tid: "T2" },
+};
+
+/** A watch-state literal built independently of createLayerState (no tautology). */
+function watchState(status: "ok" | "invalid" | "missing", features: RefFeature[], retryPending = false): RefLayerState {
+  return {
+    payload: { name: "a", color: "#e69f00", labelProp: null, status, features: { type: "FeatureCollection", features } },
+    retryPending,
+  };
+}
+
+describe("createLayerState", () => {
+  it("seeds a neutral placeholder (missing + empty) with no retry pending", () => {
+    expect(createLayerState(WATCH_SPEC)).toEqual({
+      payload: {
+        name: "a",
+        color: "#e69f00",
+        labelProp: null,
+        status: "missing",
+        features: { type: "FeatureCollection", features: [] },
+      },
+      retryPending: false,
+    });
+  });
+});
+
+describe("acceptLayerProbe", () => {
+  const C = [{ lon: LON, lat: LAT }];
+  it("replaces the payload whole, re-filtered by the circle union, on a successful parse", () => {
+    const t = acceptLayerProbe(watchState("ok", [nearPt]), { read: "ok", features: [nearPt, nearPtB, farPt] }, C);
+    expect(t.state).toEqual(watchState("ok", [nearPt, nearPtB])); // farPt excluded by the union
+    expect(t.changed).toBe(true);
+    expect(t.invalid).toBe(false);
+  });
+
+  it("defers the first parse failure: payload untouched, no emit, not terminal", () => {
+    const t = acceptLayerProbe(watchState("ok", [nearPt]), { read: "error", message: "Unexpected token" }, C);
+    expect(t.state).toEqual(watchState("ok", [nearPt], true));
+    expect(t.changed).toBe(false);
+    expect(t.invalid).toBe(false);
+  });
+
+  it("keeps last-good features with status invalid when the retry also fails", () => {
+    const t = acceptLayerProbe(watchState("ok", [nearPt, nearPtB], true), { read: "error", message: "still bad" }, C);
+    expect(t.state).toEqual(watchState("invalid", [nearPt, nearPtB]));
+    expect(t.changed).toBe(true); // status ok → invalid
+    expect(t.invalid).toBe(true);
+  });
+
+  it("re-arms one retry per failure episode and emits nothing when already invalid", () => {
+    const first = acceptLayerProbe(watchState("invalid", [nearPt]), { read: "error", message: "x" }, C);
+    expect(first.state).toEqual(watchState("invalid", [nearPt], true)); // deferred again
+    const second = acceptLayerProbe(first.state, { read: "error", message: "y" }, C);
+    expect(second.state).toEqual(watchState("invalid", [nearPt]));
+    expect(second.changed).toBe(false); // same status, same last-good features
+    expect(second.invalid).toBe(true); // ...but the wiring still warns
+  });
+
+  it("recovers transparently when the retry reads a fixed file (mid-write protection)", () => {
+    const deferred = acceptLayerProbe(watchState("ok", [nearPt]), { read: "error", message: "half-written" }, C);
+    expect(deferred.changed).toBe(false);
+    const t = acceptLayerProbe(deferred.state, { read: "ok", features: [nearPt, nearPtB] }, C);
+    expect(t.state).toEqual(watchState("ok", [nearPt, nearPtB]));
+    expect(t.changed).toBe(true);
+    expect(t.invalid).toBe(false);
+  });
+
+  it("recovers invalid → ok with a full replace", () => {
+    const t = acceptLayerProbe(watchState("invalid", [nearPt]), { read: "ok", features: [nearPtB] }, C);
+    expect(t.state).toEqual(watchState("ok", [nearPtB]));
+    expect(t.changed).toBe(true);
+  });
+
+  it("empties the layer with status missing when the file is gone; stays quiet once missing", () => {
+    const t = acceptLayerProbe(watchState("ok", [nearPt]), { read: "missing" }, C);
+    expect(t.state).toEqual(watchState("missing", []));
+    expect(t.changed).toBe(true);
+    const again = acceptLayerProbe(t.state, { read: "missing" }, C);
+    expect(again.state).toEqual(watchState("missing", []));
+    expect(again.changed).toBe(false);
+  });
+
+  it("re-adds as ok after missing (an absent file appearing under watch)", () => {
+    const t = acceptLayerProbe(watchState("missing", []), { read: "ok", features: [nearPt] }, C);
+    expect(t.state).toEqual(watchState("ok", [nearPt]));
+    expect(t.changed).toBe(true);
+  });
+
+  it("emits nothing for a rewrite that changes nothing", () => {
+    const t = acceptLayerProbe(watchState("ok", [nearPt]), { read: "ok", features: [nearPt] }, C);
+    expect(t.state).toEqual(watchState("ok", [nearPt]));
+    expect(t.changed).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/reference-layers + its watch wiring — exercised like
 // annotations-endpoint.test.ts: configureServer registers a Connect handler
-// invoked with minimal req/res mocks over real temp dirs (real fs, real scan).
+// (and, since ticket 02, watcher listeners) invoked against minimal mocks
+// over real temp dirs (real fs, real scan). The env is read once at boot,
+// like cli.ts sets it before createServer: configure the env, then start().
 
 class MockReq extends EventEmitter {
   constructor(readonly method: string) {
@@ -346,7 +467,29 @@ class MockRes {
 
 type Handler = (req: MockReq, res: MockRes) => void;
 
-function start(): Handler {
+/** Captures what the plugin registers on Vite's watcher and ws push channel. */
+class FakeWatcher {
+  readonly added: string[] = [];
+  private readonly listeners = new Map<string, Array<(file: string) => void>>();
+  add(file: string) {
+    this.added.push(file);
+  }
+  on(event: string, listener: (file: string) => void) {
+    this.listeners.set(event, [...(this.listeners.get(event) ?? []), listener]);
+  }
+  emit(event: "add" | "change" | "unlink", file: string) {
+    for (const listener of this.listeners.get(event) ?? []) listener(file);
+  }
+}
+
+class FakeWs {
+  readonly sent: string[] = [];
+  send(event: string) {
+    this.sent.push(event);
+  }
+}
+
+function start() {
   let registered: Handler | undefined;
   const fake = {
     middlewares: {
@@ -354,13 +497,15 @@ function start(): Handler {
         if (route === "/api/reference-layers") registered = handler;
       },
     },
+    watcher: new FakeWatcher(),
+    ws: new FakeWs(),
   };
   const { configureServer } = panoReferenceLayers();
   // Plugin hooks are ObjectHook: a bare function or { handler, order? }.
   if (typeof configureServer === "function") configureServer(fake as unknown as ViteDevServer);
   else configureServer?.handler(fake as unknown as ViteDevServer);
   if (!registered) throw new Error("/api/reference-layers middleware not registered");
-  return registered;
+  return { handler: registered, watcher: fake.watcher, ws: fake.ws };
 }
 
 const GH_BASE32 = "0123456789bcdefghjkmnpqrstuvwxyz";
@@ -408,7 +553,6 @@ function geohash8(lon: number, lat: number): string {
 const ENV_KEYS = ["PANO_REFERENCE_LAYERS", "PANO_PHOTOS_DIR"] as const;
 
 let dir: string;
-let handler: Handler;
 let savedEnv: Record<string, string | undefined>;
 
 beforeEach(() => {
@@ -416,7 +560,7 @@ beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "pano-ref-"));
   delete process.env.PANO_REFERENCE_LAYERS;
   delete process.env.PANO_PHOTOS_DIR;
-  handler = start();
+  // installed before any start(): the boot load may warn inside configureServer
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });
 
@@ -430,8 +574,25 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("GET /api/reference-layers", () => {
+/** Photos dir with one positioned pano at (LON, LAT). */
+function panoDir(): string {
+  const photos = path.join(dir, "photos");
+  fs.mkdirSync(photos);
+  fs.writeFileSync(path.join(photos, `${geohash8(LON, LAT)}.jpg`), "");
+  return photos;
+}
+
+/** GET the endpoint through the mock req/res. */
+function get(handler: Handler): { layers: RefLayerPayload[] } {
+  const res = new MockRes();
+  handler(new MockReq("GET"), res);
+  expect(res.statusCode).toBe(200);
+  return JSON.parse(res.body);
+}
+
+describe("GET /api/reference-layers (boot state)", () => {
   it("answers { layers: [] } when PANO_REFERENCE_LAYERS is unset (plain `vite dev`)", () => {
+    const { handler } = start();
     const res = new MockRes();
     handler(new MockReq("GET"), res);
     expect(res.statusCode).toBe(200);
@@ -449,10 +610,10 @@ describe("GET /api/reference-layers", () => {
     fs.writeFileSync(path.join(photos, "nogps-1.jpg"), "");
 
     const nearA = { type: "Feature", geometry: { type: "Point", coordinates: [LON, LAT] }, properties: { tid: "T1" } };
-    const farPt = { type: "Feature", geometry: { type: "Point", coordinates: at(0, 5000) }, properties: { tid: "T2" } };
+    const farA = { type: "Feature", geometry: { type: "Point", coordinates: at(0, 5000) }, properties: { tid: "T2" } };
     const crossing = { type: "Feature", geometry: { type: "LineString", coordinates: [at(0, 1500), at(180, 1500)] }, properties: { tid: "L1" } };
     const aFile = path.join(dir, "a.geojson");
-    fs.writeFileSync(aFile, JSON.stringify({ type: "FeatureCollection", features: [nearA, farPt] }));
+    fs.writeFileSync(aFile, JSON.stringify({ type: "FeatureCollection", features: [nearA, farA] }));
     const bFile = path.join(dir, "b.geojson");
     fs.writeFileSync(bFile, JSON.stringify({ type: "FeatureCollection", features: [crossing] }));
 
@@ -461,13 +622,10 @@ describe("GET /api/reference-layers", () => {
       { name: "a", path: aFile, color: "#e69f00", labelProp: "tid" },
       { name: "b", path: bFile, color: "#0072b2", labelProp: null },
     ]);
-
-    const res = new MockRes();
-    handler(new MockReq("GET"), res);
-    expect(res.statusCode).toBe(200);
+    const { handler } = start();
     // expected body built independently from the inputs: only the near point
     // and the edge-crossing line survive the union prefilter, both whole.
-    expect(JSON.parse(res.body)).toEqual({
+    expect(get(handler)).toEqual({
       layers: [
         { name: "a", color: "#e69f00", labelProp: "tid", status: "ok", features: { type: "FeatureCollection", features: [nearA] } },
         { name: "b", color: "#0072b2", labelProp: null, status: "ok", features: { type: "FeatureCollection", features: [crossing] } },
@@ -476,36 +634,26 @@ describe("GET /api/reference-layers", () => {
   });
 
   it("reports a missing file as status missing with empty features", () => {
-    const photos = path.join(dir, "photos");
-    fs.mkdirSync(photos);
-    fs.writeFileSync(path.join(photos, `${geohash8(LON, LAT)}.jpg`), "");
-    process.env.PANO_PHOTOS_DIR = photos;
+    process.env.PANO_PHOTOS_DIR = panoDir();
     process.env.PANO_REFERENCE_LAYERS = JSON.stringify([
       { name: "gone", path: path.join(dir, "absent.geojson"), color: "#e69f00", labelProp: null },
     ]);
-    const res = new MockRes();
-    handler(new MockReq("GET"), res);
-    expect(res.statusCode).toBe(200);
-    expect(JSON.parse(res.body)).toEqual({
+    const { handler } = start();
+    expect(get(handler)).toEqual({
       layers: [{ name: "gone", color: "#e69f00", labelProp: null, status: "missing", features: { type: "FeatureCollection", features: [] } }],
     });
     expect(console.warn).not.toHaveBeenCalled();
   });
 
   it("reports a malformed file as status invalid with empty features and a warning", () => {
-    const photos = path.join(dir, "photos");
-    fs.mkdirSync(photos);
-    fs.writeFileSync(path.join(photos, `${geohash8(LON, LAT)}.jpg`), "");
+    process.env.PANO_PHOTOS_DIR = panoDir();
     const bad = path.join(dir, "bad.geojson");
     fs.writeFileSync(bad, "{ not json");
-    process.env.PANO_PHOTOS_DIR = photos;
     process.env.PANO_REFERENCE_LAYERS = JSON.stringify([
       { name: "bad", path: bad, color: "#e69f00", labelProp: null },
     ]);
-    const res = new MockRes();
-    handler(new MockReq("GET"), res);
-    expect(res.statusCode).toBe(200);
-    expect(JSON.parse(res.body)).toEqual({
+    const { handler } = start();
+    expect(get(handler)).toEqual({
       layers: [{ name: "bad", color: "#e69f00", labelProp: null, status: "invalid", features: { type: "FeatureCollection", features: [] } }],
     });
     expect(console.warn).toHaveBeenCalled();
@@ -520,20 +668,189 @@ describe("GET /api/reference-layers", () => {
     fs.writeFileSync(f, JSON.stringify({ type: "FeatureCollection", features: [lone] }));
     process.env.PANO_PHOTOS_DIR = photos;
     process.env.PANO_REFERENCE_LAYERS = JSON.stringify([{ name: "a", path: f, color: "#e69f00", labelProp: null }]);
-    const res = new MockRes();
-    handler(new MockReq("GET"), res);
-    expect(res.statusCode).toBe(200);
-    expect(JSON.parse(res.body)).toEqual({
+    const { handler } = start();
+    expect(get(handler)).toEqual({
       layers: [{ name: "a", color: "#e69f00", labelProp: null, status: "ok", features: { type: "FeatureCollection", features: [] } }],
     });
   });
 
   it("degrades to { layers: [] } with a warning when the env JSON is corrupt", () => {
     process.env.PANO_REFERENCE_LAYERS = "{broken";
-    const res = new MockRes();
-    handler(new MockReq("GET"), res);
-    expect(res.statusCode).toBe(200);
-    expect(JSON.parse(res.body)).toEqual({ layers: [] });
+    const { handler } = start();
+    expect(get(handler)).toEqual({ layers: [] });
     expect(console.warn).toHaveBeenCalled();
+  });
+});
+
+describe("reference layer watch (ticket 02)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const write = (file: string, features: RefFeature[]) =>
+    fs.writeFileSync(file, JSON.stringify({ type: "FeatureCollection", features }));
+
+  /** Write each sheet's file (unless absent-at-boot), set the env, boot the plugin. */
+  function bootLayers(sheets: Array<{ name: string; file: string; features?: RefFeature[] }>) {
+    process.env.PANO_PHOTOS_DIR = panoDir();
+    for (const s of sheets) if (s.features) write(s.file, s.features);
+    process.env.PANO_REFERENCE_LAYERS = JSON.stringify(
+      sheets.map((s) => ({ name: s.name, path: s.file, color: "#e69f00", labelProp: null })),
+    );
+    return start();
+  }
+
+  it("registers each layer file with Vite's watcher — files absent at boot too", () => {
+    const a = path.join(dir, "a.geojson");
+    const b = path.join(dir, "later.geojson");
+    const ctx = bootLayers([
+      { name: "a", file: a, features: [nearPt] },
+      { name: "b", file: b }, // absent at boot — may appear later under watch
+    ]);
+    expect(ctx.watcher.added).toEqual([a, b]);
+    expect(get(ctx.handler).layers.map((l) => l.status)).toEqual(["ok", "missing"]);
+  });
+
+  it("re-reads and re-filters on change after the 300 ms debounce, pushing one ws event", () => {
+    const file = path.join(dir, "a.geojson");
+    const ctx = bootLayers([{ name: "a", file, features: [nearPt] }]);
+    write(file, [nearPt, nearPtB]);
+    ctx.watcher.emit("change", file);
+    vi.advanceTimersByTime(299);
+    expect(get(ctx.handler).layers[0]?.features.features).toEqual([nearPt]); // debounce pending
+    vi.advanceTimersByTime(1);
+    const layer = get(ctx.handler).layers[0];
+    expect(layer?.status).toBe("ok");
+    expect(layer?.features.features).toEqual([nearPt, nearPtB]);
+    expect(ctx.ws.sent).toEqual(["reference-layers:changed"]);
+  });
+
+  it("debounces per file: bursts collapse, files stay independent", () => {
+    const a = path.join(dir, "a.geojson");
+    const b = path.join(dir, "b.geojson");
+    const ctx = bootLayers([
+      { name: "a", file: a, features: [nearPt] },
+      { name: "b", file: b, features: [nearPt] },
+    ]);
+    write(a, [nearPt, nearPtB]);
+    ctx.watcher.emit("change", a);
+    vi.advanceTimersByTime(100); // a second burst 100 ms into a's window
+    write(b, [nearPt, nearPtB]);
+    ctx.watcher.emit("change", b);
+    vi.advanceTimersByTime(199);
+    expect(get(ctx.handler).layers.map((l) => l.features.features.length)).toEqual([1, 1]); // neither elapsed
+    vi.advanceTimersByTime(1); // t=300: a's window closes
+    expect(get(ctx.handler).layers[0]?.features.features).toEqual([nearPt, nearPtB]);
+    expect(get(ctx.handler).layers[1]?.features.features).toEqual([nearPt]);
+    vi.advanceTimersByTime(99); // t=399: b's window (opened at t=100) still open
+    expect(get(ctx.handler).layers[1]?.features.features).toEqual([nearPt]);
+    vi.advanceTimersByTime(1); // t=400
+    expect(get(ctx.handler).layers[1]?.features.features).toEqual([nearPt, nearPtB]);
+    expect(ctx.ws.sent).toEqual(["reference-layers:changed", "reference-layers:changed"]);
+  });
+
+  it("keeps last good + status invalid after a corruption outlives its one retry", () => {
+    const file = path.join(dir, "a.geojson");
+    const ctx = bootLayers([{ name: "a", file, features: [nearPt, nearPtB] }]);
+    fs.writeFileSync(file, "{broken mid-write");
+    ctx.watcher.emit("change", file);
+    vi.advanceTimersByTime(300); // debounce → probe fails → deferred, retry armed
+    let layer = get(ctx.handler).layers[0];
+    expect(layer?.status).toBe("ok"); // a deferred failure keeps serving the last good
+    expect(layer?.features.features).toEqual([nearPt, nearPtB]);
+    expect(ctx.ws.sent).toEqual([]);
+    vi.advanceTimersByTime(300); // retry → still bad → terminal
+    layer = get(ctx.handler).layers[0];
+    expect(layer?.status).toBe("invalid");
+    expect(layer?.features.features).toEqual([nearPt, nearPtB]); // last good kept, never blanked
+    expect(ctx.ws.sent).toEqual(["reference-layers:changed"]);
+    expect(console.warn).toHaveBeenCalled();
+  });
+
+  it("recovers transparently when the file is fixed inside the retry window (mid-write)", () => {
+    const file = path.join(dir, "a.geojson");
+    const ctx = bootLayers([{ name: "a", file, features: [nearPt] }]);
+    fs.writeFileSync(file, "{partial");
+    ctx.watcher.emit("change", file);
+    vi.advanceTimersByTime(300); // deferred — retry armed
+    write(file, [nearPtB]);
+    vi.advanceTimersByTime(300); // the retry reads the now-fixed file
+    const layer = get(ctx.handler).layers[0];
+    expect(layer?.status).toBe("ok"); // status never left ok
+    expect(layer?.features.features).toEqual([nearPtB]);
+    expect(ctx.ws.sent).toEqual(["reference-layers:changed"]);
+  });
+
+  it("recovers invalid → ok once the producer writes valid JSON again", () => {
+    const file = path.join(dir, "a.geojson");
+    const ctx = bootLayers([{ name: "a", file, features: [nearPt] }]);
+    fs.writeFileSync(file, "{broken");
+    ctx.watcher.emit("change", file);
+    vi.advanceTimersByTime(600); // debounce + the one retry
+    expect(get(ctx.handler).layers[0]?.status).toBe("invalid");
+    write(file, [nearPtB]);
+    ctx.watcher.emit("change", file);
+    vi.advanceTimersByTime(300);
+    const layer = get(ctx.handler).layers[0];
+    expect(layer?.status).toBe("ok");
+    expect(layer?.features.features).toEqual([nearPtB]);
+    expect(ctx.ws.sent).toEqual(["reference-layers:changed", "reference-layers:changed"]);
+  });
+
+  it("unlink → status missing with empty features; re-add → ok again", () => {
+    const file = path.join(dir, "a.geojson");
+    const ctx = bootLayers([{ name: "a", file, features: [nearPt] }]);
+    fs.rmSync(file);
+    ctx.watcher.emit("unlink", file);
+    vi.advanceTimersByTime(300);
+    let layer = get(ctx.handler).layers[0];
+    expect(layer?.status).toBe("missing");
+    expect(layer?.features.features).toEqual([]);
+    write(file, [nearPtB]);
+    ctx.watcher.emit("add", file);
+    vi.advanceTimersByTime(300);
+    layer = get(ctx.handler).layers[0];
+    expect(layer?.status).toBe("ok");
+    expect(layer?.features.features).toEqual([nearPtB]);
+    expect(ctx.ws.sent).toEqual(["reference-layers:changed", "reference-layers:changed"]);
+  });
+
+  it("serves a file absent at boot as missing and picks it up when it appears", () => {
+    const file = path.join(dir, "later.geojson");
+    const ctx = bootLayers([{ name: "later", file }]);
+    expect(get(ctx.handler).layers[0]?.status).toBe("missing");
+    write(file, [nearPt]);
+    ctx.watcher.emit("add", file);
+    vi.advanceTimersByTime(300);
+    const layer = get(ctx.handler).layers[0];
+    expect(layer?.status).toBe("ok");
+    expect(layer?.features.features).toEqual([nearPt]);
+  });
+
+  it("pushes nothing when a rewrite changes nothing", () => {
+    const file = path.join(dir, "a.geojson");
+    const ctx = bootLayers([{ name: "a", file, features: [nearPt] }]);
+    ctx.watcher.emit("change", file); // same bytes on disk
+    vi.advanceTimersByTime(600);
+    expect(ctx.ws.sent).toEqual([]);
+    expect(get(ctx.handler).layers[0]?.status).toBe("ok");
+  });
+
+  it("reloads every layer sharing a file together, with one ws event per change", () => {
+    const file = path.join(dir, "shared.geojson");
+    const ctx = bootLayers([
+      { name: "a", file, features: [nearPt] },
+      { name: "b", file, features: [nearPt] },
+    ]);
+    write(file, [nearPtB]);
+    ctx.watcher.emit("change", file);
+    vi.advanceTimersByTime(300);
+    const layers = get(ctx.handler).layers;
+    expect(layers.map((l) => l.status)).toEqual(["ok", "ok"]);
+    expect(layers.map((l) => l.features.features)).toEqual([[nearPtB], [nearPtB]]);
+    expect(ctx.ws.sent).toEqual(["reference-layers:changed"]);
   });
 });
