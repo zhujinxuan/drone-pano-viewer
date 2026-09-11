@@ -4,16 +4,18 @@
 
 **Blocked by:** 01 — CLI layer flags + endpoint.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Fetch on mount (cancelled-flag pattern like annotations) + `import.meta.hot.on("reference-layers:changed", refetch)`
-- [ ] ReferenceOverlay component: points/lines/polygons per spec, layer color, translucent polygon fill ~15%
-- [ ] Point labels as DOM markers via per-frame projection (annotation-label approach), label precedence honored
-- [ ] Per-pano cull at 1100 m (vertex-based, documented)
-- [ ] Scene-root attach, full dispose on rebuild/unmount; no annotation behavior changed
-- [ ] `three-core.d.ts` extended only if a needed export is missing
-- [ ] Visually verifiable: a layer geojson near a pano renders in the sphere view
+- [x] Fetch on mount (cancelled-flag pattern like annotations) + `import.meta.hot.on("reference-layers:changed", refetch)`
+- [x] ReferenceOverlay component: points/lines/polygons per spec, layer color, translucent polygon fill ~15%
+- [x] Point labels as DOM markers via per-frame projection (annotation-label approach), label precedence honored
+- [x] Per-pano cull at 1100 m (vertex-based, documented)
+- [x] Scene-root attach, full dispose on rebuild/unmount; no annotation behavior changed
+- [x] `three-core.d.ts` extended only if a needed export is missing
+- [x] Visually verifiable: a layer geojson near a pano renders in the sphere view
 
 ## Comments
 
 Spec: `.scratch/reference-layers/spec.md` §Client behavior. Toolbar (visibility toggles) and click-inspect are ticket 04 — this ticket renders all layers always-visible.
+
+Implemented 2026-09-11. 8 cull tests green + browser smoke (synthetic pano + 3 layers: cull verified — far edge-clip line served but not rendered; HMR event → new label without reload; label precedence incl. labelProp + 水保点 fallback + bare dot; nogps renders nothing; fill 15%). Code review (Standards+Spec): pass; fixed colorNum to accept all contract hex widths (3/4/6/8) so DOM and 3D scene agree; fixed test-header margin claim. Latent pre-existing MetadataPanel exifr sync-throw hang filed as .scratch/metadata-panel/issues/01 (needs-triage).

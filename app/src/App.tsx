@@ -20,8 +20,10 @@ import {
   type AnnKind,
 } from "./lib/annotations";
 import { centroidView, groundTarget, type GroundCam } from "./lib/ground-capture";
+import type { RefLayerPayload } from "./lib/reference-layers";
 import { formatMeasureChip, measureBetween, type MeasurePoint } from "./lib/measure";
 import MeasureOverlay from "./components/MeasureOverlay";
+import ReferenceOverlay from "./components/ReferenceOverlay";
 import MetadataPanel from "./components/MetadataPanel";
 import NavStrip from "./components/NavStrip";
 import AnnotationOverlay, { swingTo } from "./components/AnnotationOverlay";
@@ -112,6 +114,16 @@ export default function App() {
   const [measureOn, setMeasureOn] = useState(false);
   const [measureA, setMeasureA] = useState<MeasurePoint | null>(null);
   const [measureB, setMeasureB] = useState<MeasurePoint | null>(null);
+
+  // --- Reference layers (.scratch/reference-layers/spec.md §Client
+  // behavior, tickets 02/03) --- Read-only external GeoJSON mirrored by the
+  // dev server. Fetched on mount and refetched on the server's
+  // "reference-layers:changed" push (file watcher lands in ticket 02); a
+  // failed fetch just renders nothing — layers are optional decoration.
+  const [refLayers, setRefLayers] = useState<RefLayerPayload[] | null>(null);
+  // Visibility per layer name, all-true on load — ticket 04's toolbar is
+  // the only writer; the overlay reads it (absent name = visible).
+  const [layerVisible, setLayerVisible] = useState<Record<string, boolean>>({});
 
   const [params] = useState(() => new URLSearchParams(window.location.search));
   const titleParam = params.get("title");
@@ -250,6 +262,38 @@ export default function App() {
       .catch(() => {});
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  // Reference layers: fetch once on mount (cancelled-flag pattern like the
+  // annotations boot-load) and refetch on the server's file-watch push —
+  // the HMR event is the frozen contract with the ticket 02 watcher.
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      fetch("/api/reference-layers")
+        .then((r) =>
+          r.ok
+            ? (r.json() as Promise<{ layers: RefLayerPayload[] }>)
+            : Promise.reject(new Error(`HTTP ${r.status}`)),
+        )
+        .then((json) => {
+          if (cancelled) return;
+          setRefLayers(json.layers);
+          // (Re)seed visibility: every layer visible unless already toggled.
+          setLayerVisible((prev) => {
+            const next: Record<string, boolean> = {};
+            for (const l of json.layers) next[l.name] = prev[l.name] ?? true;
+            return next;
+          });
+        })
+        .catch(() => {});
+    };
+    load();
+    import.meta.hot?.on("reference-layers:changed", load);
+    return () => {
+      cancelled = true;
+      import.meta.hot?.off("reference-layers:changed", load);
     };
   }, []);
 
@@ -747,6 +791,14 @@ export default function App() {
                 : null
             }
             selectedId={selectedId}
+          />
+        )}
+        {viewerObj !== null && (
+          <ReferenceOverlay
+            viewer={viewerObj}
+            cam={groundCam}
+            layers={refLayers ?? []}
+            visible={layerVisible}
           />
         )}
         {viewerObj !== null && current !== null && measureOn && (
