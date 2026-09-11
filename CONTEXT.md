@@ -17,7 +17,9 @@ Glossary for the local drone-panorama viewer. Use these terms verbatim in issues
 | **annotations file** | `<photos-dir>/annotations.geojson` — one GeoJSON FeatureCollection (`version: 1`) holding every annotation for the photos-dir; the viewer's only stateful file. |
 | **outbox** | The annotations file's role: a durable, single-writer (viewer-only), read-only-for-consumers message store. Consumers sync by `id`/`updated`; deletion = feature vanishes. |
 | **ann-id** | An annotation's stable id, `ann-<ULID>` — unique across sessions and photos-dirs, k-sorted by creation, never reused. |
-| **layer** | Not a GeoJSON concept: a logical grouping of annotations by `properties.photo` / `properties.photoTitle`. Consumers filter; the file stays flat. |
+| **layer** | Not a GeoJSON concept: a logical grouping of annotations by `properties.photo` / `properties.photoTitle`. Consumers filter; the file stays flat. Annotation-only — unrelated to **reference layer**. |
 | **in-progress shape** | A line/polygon being drawn — vertices captured but not yet finished with Enter. Discarded on photo switch; never written to the annotations file. |
+| **reference layer** | An external, read-only, file-backed GeoJSON overlay (turbine foundations, avoidance areas…) passed via repeatable `--layer` flags. Produced and edited by outside tools; file changes reach the viewer by watch. The viewer never writes it. |
+| **measure** | An ephemeral two-point ground distance/bearing readout on the current pano. Never persisted — a measurement is not an annotation. |
 
-Design decisions: see `docs/adr/0001-architecture.md` and `docs/adr/0002-annotations-outbox.md`.
+Design decisions: see `docs/adr/0001-architecture.md`, `docs/adr/0002-annotations-outbound.md`, and `docs/adr/0003-reference-layers.md`.

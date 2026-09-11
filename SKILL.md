@@ -32,6 +32,7 @@ The viewer reads position and identity **from filenames** — nothing else:
    npm run pano -- view <file-or-dir> [--id <geohash8>] [--near <lon,lat>]
                        [--title <text>] [--playlist <file.json>]
                        [--annotations <path>]
+                      [--layer <name>=<path.geojson>[,#hex][,label=<prop>]]…
    npm run pano -- list <dir> [--json]
    ```
 
@@ -77,6 +78,48 @@ Draw POI points, lines, polygons **on the pano** — captured from the reticle o
 - Atomic rename means no torn reads. Typical batch flow: the user labels a playlist of 10–20 photos, then the agent ingests that dir's file afterward.
 
 See `docs/adr/0002-annotations-outbox.md`.
+
+## Reference layers
+
+Show **externally-owned** geo data — turbine foundations, sensitive/avoidance areas — inside the pano: read-only GeoJSON files produced and edited by outside tools (QGIS, scripts, greedy-turbine-select), passed at startup with repeatable `--layer` flags and re-loaded automatically when the file changes on disk. The viewer never writes them; there is no in-viewer editing.
+
+**CLI contract** — repeatable flag, palette assigned in flag order:
+
+```
+npm run pano -- view <dir> --layer turbines=turbines.geojson
+                          --layer avoid=areas.geojson,#cc79a7
+                          --layer pads=foundations.geojson,label=turbine
+```
+
+- Grammar `<name>=<path.geojson>[,#hex][,label=<prop>]` — `#hex` and `label=` optional, either order, at most once each; malformed syntax fails fast at startup. `name` non-empty, shown in the toolbar; `path` absolute or CWD-relative. A missing file at startup warns and serves empty — not fatal, it may appear later under watch.
+- Colors: `#hex` (3/4/6/8 digits) overrides the default; otherwise assigned from the Okabe-Ito colorblind-safe palette by flag order, skipping palette colors already taken by an explicit `#hex` (explicit colors never consume slots); the pool wraps when exhausted.
+- Point labels: `label=<prop>` names the property; default precedence `labelProp` > `label` > `name` > `id` > `turbine` — first non-blank string wins (finite numbers stringify), no match → an unlabeled dot, never an error.
+- GeoJSON only, no GPKG — producers export `.geojson` siblings instead.
+
+**Server contract** — `GET /api/reference-layers` → `{ layers: [{ name, color, labelProp, status, features }] }` with `status: "ok" | "invalid" | "missing"`; never a 500 — a broken layer degrades with a warning. At load each feature is included **whole** iff it intersects the union of 1 km-radius circles around every positioned pano of the served dir (full scan, not the playlist — a playlist is a review restriction, not a data extent); no clipping — geometry and foreign properties pass through verbatim. The client fetches once on mount and refetches on every `reference-layers:changed` ws push.
+
+**Live update (file watch)** — the server watches each layer file with Vite's own watcher (no new dependency): 300 ms debounce per file → re-read → re-filter → ws push **when the served payload actually changed**. A parse failure retries once after 300 ms; still bad → keep last-good features, `status: "invalid"`. Deleted file → empty features, `status: "missing"`. Any successful parse fully replaces, `status: "ok"`. A producer wanting push semantics just writes the file.
+
+**UI contract**:
+
+- **Render** (only when the pano has a camera position + altitude): points → colored dot + DOM label, lines → polylines, polygons → boundary + translucent fill (~15% opacity); same flat-ground projection and per-frame label discipline as annotations.
+- **Per-pano cull**: a feature with every vertex more than 1100 m from the current camera is not drawn — the prefilter bounds the data extent, the cull is per-photo render hygiene.
+- **Layer toolbar** (bottom right): foldable, draggable by its header; position + fold persisted in `localStorage` (`pano.refLayerToolbar`). One row per layer: color swatch, name, visibility checkbox (all visible by default), feature count, and a ⚠ glyph when `status != "ok"` (tooltip: "invalid geojson, showing last good" / "file not found"). Zero layers → no toolbar at all.
+- **Click-inspect**: while no capture mode is active, a click on a feature opens a small read-only readout — layer name (with swatch) + every property in file order; Esc, ✕, or a click elsewhere closes. No editing affordances.
+
+See `docs/adr/0003-reference-layers.md`.
+
+## Measure mode
+
+Ephemeral two-point ground distance/bearing on the current pano — **nothing persisted**: a measurement is not an annotation and never touches the annotations file. Needs a camera position + RelativeAltitude but no outbox.
+
+**UI contract**:
+
+- **Mode rail** (top left): fourth button after `point` / `line` / `polygon`, exclusive with them — entering measure exits (and clears) any annotation draft; clicking the button again or `Esc` exits and clears the measurement.
+- **Capture**: `Space` at the reticle or a click (drag-guarded) sets A — same flat-ground capture as annotation vertices, same reject flash at/above the horizon. While B is unset, the dashed rubber band + chip track the live reticle aim; the second click sets B; a third click starts a new A (the finished measurement is discarded).
+- **Readout chip** (projected at the measured end point): `<dist> · <bearing>° · ±<err>` — distance with the HUD `dist` formatting (10 m rounding, `> 5 km` cap), forward bearing A→B clockwise from true north at 1 dp, and ±err = the two endpoints' differential errors (pitch sensitivity + terrain) combined in quadrature; the camera-position σ is common-mode and cancels.
+- **Esc chain**: in-progress annotation shape → current measurement (stays in mode) → annotation mode → measure mode → inspect readout.
+- **Disabled** on `nogps-*` or missing-RelativeAltitude photos (button greyed out), like annotation modes; switching panos clears A/B.
 
 ## Caveats
 
