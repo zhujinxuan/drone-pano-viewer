@@ -1,0 +1,37 @@
+/* Measure overlay (reference-layers ticket 05) — readout chip projected over
+   the pano at the measured end point. Same contract as the annotation
+   labels: pointer-events none (clicks pass through to PSV), dark chip with
+   #e6e6ea monospace text; the left border echoes the 3D rubber-band color so
+   DOM and scene agree. */
+
+.measure-overlay {
+  position: absolute;
+  inset: 0;
+  /* Above the pano canvas, below HUD/panels (same layer as annotations). */
+  z-index: 5;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.measure-chip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  /* Off-stage until the first projection writes a real transform. */
+  transform: translate(-100px, -100px);
+  padding: 2px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-left: 3px solid #ff7edb;
+  border-radius: 4px;
+  background: rgba(10, 10, 14, 0.72);
+  color: #e6e6ea;
+  font-family: ui-monospace, Consolas, "Cascadia Mono", monospace;
+  font-size: 11.5px;
+  line-height: 1.4;
+  white-space: nowrap;
+  text-shadow: 0 1px 2px #000;
+}
+
+.measure-chip.is-hidden {
+  visibility: hidden;
+}

@@ -25,6 +25,15 @@ export interface GroundTarget {
   lat: number;
   /** Along-track error in meters — the copy-record error model. */
   errM: number;
+  /**
+   * Differential part of `errM`: pitch sensitivity + terrain, with the
+   * camera-position σ excluded. Two endpoints captured from the SAME pano
+   * share the camera fix — a position shift moves both together and cancels
+   * in their separation — so A→B measurement error (measure mode) combines
+   * only this part. The model is a linear sum, so σ = 0 removes exactly the
+   * common-mode term.
+   */
+  errDiffM: number;
 }
 
 /** View angles that put a world point at the reticle. */
@@ -62,6 +71,7 @@ export function groundTarget(
     lon: target.lon,
     lat: target.lat,
     errM: estimateErrorM(cam.relAltM, pitchRad, positionSigmaM(cam)),
+    errDiffM: estimateErrorM(cam.relAltM, pitchRad, 0),
   };
 }
 

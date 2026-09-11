@@ -25,6 +25,9 @@ describe("groundTarget — worked example", () => {
     expect(t!.lon).toBeCloseTo(123.931362418914, 9);
     // 100·δp/sin²45° + 1/tan45° + 20
     expect(t!.errM).toBeCloseTo(21.3490658504, 6);
+    // errDiffM excludes the common-mode position σ (measure mode): same
+    // model with σ = 0 → 100·δp/sin²45° + 1/tan45°
+    expect(t!.errDiffM).toBeCloseTo(1.3490658504, 6);
   });
 
   it("corroborates the target against textbook curvature radii", () => {

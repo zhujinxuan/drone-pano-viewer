@@ -10,7 +10,9 @@ import { featureVertices } from "../lib/annotations";
  *
  * Renders:
  *  1. Top-left rail (always visible): Point / Line / Polygon mode buttons
- *     with active-state styling, a `?` chip unfolding a shortcuts dropdown
+ *     with active-state styling, a fourth `measure` button (reference-layers
+ *     ticket 05 — exclusive with the draw modes, wired through to App like
+ *     the others), a `?` chip unfolding a shortcuts dropdown
  *     (help only — no rebinding), and a list-toggle chip.
  *  2. Entity list panel (`e` toggles): the current photo's entities grouped
  *     Point/Line/Polygon in file order; each row = label (click → select +
@@ -37,6 +39,12 @@ import { featureVertices } from "../lib/annotations";
  *   onModeChange        new mode, or null when the active mode's button is
  *                       clicked again (exit) — App also exits via Esc
  *   canAnnotate         false greys the mode buttons (no position/altitude)
+ *   measureActive       measure mode on (ticket 05; exclusive with `mode`)
+ *   onMeasureToggle     measure rail button click — App enters/exits measure,
+ *                       leaving the annotation modes
+ *   canMeasure          false greys the measure button (no position/
+ *                       altitude — needs no annotations outbox: a
+ *                       measurement is never persisted)
  *   inProgress          non-null shows the hint bar; vertexCount drives the
  *                       `N verts` readout and the ✓/undo disabled states
  *   onFinish            ✓ button (enabled only at line ≥ 2 / polygon ≥ 3)
@@ -75,6 +83,12 @@ export interface AnnotationPanelProps {
   mode: AnnKind | null;
   onModeChange: (mode: AnnKind | null) => void;
   canAnnotate: boolean;
+  /** Measure mode (reference-layers ticket 05): rail button state. */
+  measureActive: boolean;
+  /** Enter/exit measure mode; exclusive with the draw modes. */
+  onMeasureToggle: () => void;
+  /** Position + altitude available (nogps / missing RelativeAltitude). */
+  canMeasure: boolean;
   inProgress: AnnotationHint | null;
   onFinish: () => void;
   onUndoVertex: () => void;
@@ -237,6 +251,9 @@ export default function AnnotationPanel({
   onDismissToast,
   pendingLabelForId,
   onPendingLabelDone,
+  measureActive,
+  onMeasureToggle,
+  canMeasure,
   open,
   onOpenChange,
 }: AnnotationPanelProps) {
@@ -354,6 +371,33 @@ export default function AnnotationPanel({
             {icon}
           </button>
         ))}
+        <button
+          type="button"
+          className={`ann-pnl-mbtn${measureActive ? " ann-pnl-on" : ""}`}
+          disabled={!canMeasure}
+          aria-pressed={measureActive}
+          title={
+            canMeasure
+              ? "Measure mode — click again (or Esc) to exit"
+              : "no position/altitude — measure unavailable"
+          }
+          onClick={onMeasureToggle}
+        >
+          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+            <line
+              x1="3.2"
+              y1="12.8"
+              x2="12.8"
+              y2="3.2"
+              stroke="currentColor"
+              strokeWidth="1.4"
+              strokeDasharray="2.4 2"
+              strokeLinecap="round"
+            />
+            <circle cx="3.2" cy="12.8" r="1.7" fill="currentColor" />
+            <circle cx="12.8" cy="3.2" r="1.7" fill="currentColor" />
+          </svg>
+        </button>
         <div className="ann-pnl-rail-sep" />
         <button
           type="button"

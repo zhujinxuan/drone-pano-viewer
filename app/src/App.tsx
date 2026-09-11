@@ -20,6 +20,8 @@ import {
   type AnnKind,
 } from "./lib/annotations";
 import { centroidView, groundTarget, type GroundCam } from "./lib/ground-capture";
+import { formatMeasureChip, measureBetween, type MeasurePoint } from "./lib/measure";
+import MeasureOverlay from "./components/MeasureOverlay";
 import MetadataPanel from "./components/MetadataPanel";
 import NavStrip from "./components/NavStrip";
 import AnnotationOverlay, { swingTo } from "./components/AnnotationOverlay";
@@ -103,6 +105,14 @@ export default function App() {
   const saveTimer = useRef<number | null>(null);
   const rejectTimer = useRef<number | null>(null);
 
+  // --- Measure mode (.scratch/reference-layers/spec.md §Measure mode) ---
+  // Ephemeral two-point ground measurement. Never persisted — no outbox
+  // needed, only a camera position + altitude; A/B are captured ground
+  // targets (ground-capture seam) cleared by pano switch / Esc / mode exit.
+  const [measureOn, setMeasureOn] = useState(false);
+  const [measureA, setMeasureA] = useState<MeasurePoint | null>(null);
+  const [measureB, setMeasureB] = useState<MeasurePoint | null>(null);
+
   const [params] = useState(() => new URLSearchParams(window.location.search));
   const titleParam = params.get("title");
 
@@ -140,9 +150,22 @@ export default function App() {
   const currentFeatures =
     anns !== null && current !== null ? forPhoto(anns, current.id) : [];
 
+  // Measure needs position + altitude but no annotations outbox (nothing
+  // persists). The live aim is the reticle's ground point while B is unset —
+  // the rubber band and chip track it at HUD tick rate; readout math in
+  // lib/measure (Vincenty inverse + quadrature err).
+  const canMeasure = current !== null && groundCam !== null;
+  const measureAim =
+    measureOn && measureA !== null && measureB === null
+      ? groundTarget(groundCam, hud.yaw * DEG, hud.pitch * DEG)
+      : null;
+  const measureEnd = measureB ?? measureAim;
+  const measureReadout =
+    measureA !== null && measureEnd !== null ? measureBetween(measureA, measureEnd) : null;
+
   // Each pano carries its own EXIF capture time and XMP altitude. A switch
-  // also discards the in-progress shape (spec §Small print) and the
-  // selection (entities are per-photo).
+  // also discards the in-progress shape (spec §Small print), the measure
+  // endpoints, and the selection (entities are per-photo).
   useEffect(() => {
     setCaptureTime(null);
     setRelAlt(null);
@@ -152,6 +175,8 @@ export default function App() {
     setSelectedId(null);
     setPendingLabelForId(null);
     setDeleted(null);
+    setMeasureA(null);
+    setMeasureB(null);
   }, [panoramaUrl]);
 
   useEffect(() => {
@@ -374,16 +399,72 @@ export default function App() {
     },
     [mode, groundCam, current, title, annCam, mutateAnns, flashReject],
   );
-  // The viewer's click listener (created per pano) calls through this ref.
-  const addVertexRef = useRef(addVertex);
+  /**
+   * Measure capture (ticket 05): same ground-capture seam and reject flash.
+   * First click sets A; second sets B; a third restarts at A (the finished
+   * measurement is discarded — nothing persists).
+   */
+  const measureAdd = useCallback(
+    (yawDeg: number, pitchDeg: number) => {
+      if (!measureOn || groundCam === null) return;
+      const t = groundTarget(groundCam, yawDeg, pitchDeg);
+      if (t === null) {
+        flashReject();
+        return;
+      }
+      if (measureA === null || measureB !== null) {
+        setMeasureA(t);
+        setMeasureB(null);
+      } else {
+        setMeasureB(t);
+      }
+    },
+    [measureOn, groundCam, measureA, measureB, flashReject],
+  );
+  // The viewer's click listener (created per pano) and the Space key call
+  // through this ref — it dispatches to whichever capture mode is active.
+  const aimCaptureRef = useRef(addVertex);
   useEffect(() => {
-    addVertexRef.current = addVertex;
+    aimCaptureRef.current =
+      mode !== null
+        ? addVertex
+        : measureOn
+          ? measureAdd
+          : () => {};
   });
 
   const clearDraft = useCallback(() => {
     setDraftVerts([]);
     setDraftErrs([]);
   }, []);
+
+  const clearMeasure = useCallback(() => {
+    setMeasureA(null);
+    setMeasureB(null);
+  }, []);
+
+  /** Rail pick: annotation modes and measure are exclusive — entering one
+   *  exits (and clears) the other's in-progress state. */
+  const changeMode = useCallback(
+    (m: AnnKind | null) => {
+      setMode(m);
+      clearDraft();
+      if (m !== null) {
+        setMeasureOn(false);
+        clearMeasure();
+      }
+    },
+    [clearDraft, clearMeasure],
+  );
+
+  /** Measure rail button: toggle measure, always leaving annotation mode
+   *  and dropping any draft/measurement (exit clears all, spec §Measure). */
+  const toggleMeasure = useCallback(() => {
+    setMeasureOn((on) => !on);
+    setMode(null);
+    clearDraft();
+    clearMeasure();
+  }, [clearDraft, clearMeasure]);
 
   /** Enter: finish at ≥ min vertices → entity + label input; else cancel. */
   const finishDraft = useCallback(() => {
@@ -497,9 +578,9 @@ export default function App() {
       } else if (e.key === "[" || e.key === "p") {
         e.preventDefault();
         navigate(-1);
-      } else if (e.key === " " && mode !== null) {
+      } else if (e.key === " " && (mode !== null || measureOn)) {
         e.preventDefault();
-        addVertexRef.current(hudRef.current.yaw * DEG, hudRef.current.pitch * DEG);
+        aimCaptureRef.current(hudRef.current.yaw * DEG, hudRef.current.pitch * DEG);
       } else if (e.key === "Enter" && (mode === "line" || mode === "polygon")) {
         e.preventDefault();
         finishDraft();
@@ -508,7 +589,9 @@ export default function App() {
         undoVertex();
       } else if (e.key === "Escape") {
         if (draftVerts.length > 0) clearDraft();
+        else if (measureA !== null) clearMeasure();
         else if (mode !== null) setMode(null);
+        else if (measureOn) setMeasureOn(false);
       } else if ((e.key === "Delete" || e.key === "d") && selectedId !== null) {
         e.preventDefault();
         deleteEntityById(selectedId);
@@ -527,7 +610,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [navigate, mode, draftVerts.length, selectedId, current, finishDraft, undoVertex, clearDraft, deleteEntityById]);
+  }, [navigate, mode, measureOn, measureA, draftVerts.length, selectedId, current, finishDraft, undoVertex, clearDraft, clearMeasure, deleteEntityById]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -558,7 +641,7 @@ export default function App() {
       const d = ev.data;
       if (d.rightclick) return;
       if (Math.hypot(d.clientX - downX, d.clientY - downY) > CLICK_SLOP_PX) return;
-      addVertexRef.current(d.yaw * DEG, d.pitch * DEG);
+      aimCaptureRef.current(d.yaw * DEG, d.pitch * DEG);
     });
 
     // Live yaw/pitch/FOV overlay — events write into `latest`, a 10 Hz timer
@@ -666,15 +749,24 @@ export default function App() {
             selectedId={selectedId}
           />
         )}
+        {viewerObj !== null && current !== null && measureOn && (
+          <MeasureOverlay
+            viewer={viewerObj}
+            cam={groundCam}
+            a={measureA}
+            end={measureEnd}
+            chipText={measureReadout === null ? null : formatMeasureChip(measureReadout)}
+          />
+        )}
         {photos !== null && (
           <AnnotationPanel
             features={currentFeatures}
             mode={mode}
-            onModeChange={(m) => {
-              setMode(m);
-              clearDraft();
-            }}
+            onModeChange={changeMode}
             canAnnotate={canAnnotate}
+            measureActive={measureOn}
+            onMeasureToggle={toggleMeasure}
+            canMeasure={canMeasure}
             inProgress={
               mode === "line" || mode === "polygon"
                 ? { kind: mode, vertexCount: draftVerts.length }

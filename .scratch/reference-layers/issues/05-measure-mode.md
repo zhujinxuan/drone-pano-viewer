@@ -4,16 +4,18 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `measure` rail button, exclusive mode, Esc/re-click exit; same disabled states as annotation modes
-- [ ] A/B capture via reticle Space or drag-guarded click (annotation ground-capture reuse)
-- [ ] Rubber-band line + live distance during A→B aiming
-- [ ] Readout chip: distance (10 m rounding) + bearing A→B (1 dp) + ±err (copy-record model)
-- [ ] Esc clears current measurement; mode exit clears all; third click restarts at A
-- [ ] Pure measure lib (distance/bearing/err + formatting) unit-tested against geodesy GeodTest vectors
-- [ ] Nothing persisted; annotations file untouched
+- [x] `measure` rail button, exclusive mode, Esc/re-click exit; same disabled states as annotation modes
+- [x] A/B capture via reticle Space or drag-guarded click (annotation ground-capture reuse)
+- [x] Rubber-band line + live distance during A→B aiming
+- [x] Readout chip: distance (10 m rounding) + bearing A→B (1 dp) + ±err (copy-record model)
+- [x] Esc clears current measurement; mode exit clears all; third click restarts at A
+- [x] Pure measure lib (distance/bearing/err + formatting) unit-tested against geodesy GeodTest vectors
+- [x] Nothing persisted; annotations file untouched
 
 ## Comments
 
 Spec: `.scratch/reference-layers/spec.md` §Measure mode. Multi-segment paths are a non-goal.
+
+Implemented 2026-09-11. Code review (Standards+Spec) fixed: B??aim fallback single-owned by App (overlay takes `end`); ±err now combines only the differential parts (errDiffM — position σ is common-mode for same-pano endpoints and cancels), GroundTarget gained errDiffM; misleading test name fixed. 34 tests green + live browser smoke (rail exclusivity, A/B capture, rubber band, chip, Esc chain, nogps disable).
