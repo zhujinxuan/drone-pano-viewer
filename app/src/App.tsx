@@ -117,6 +117,12 @@ export default function App() {
   const [measureA, setMeasureA] = useState<MeasurePoint | null>(null);
   const [measureB, setMeasureB] = useState<MeasurePoint | null>(null);
 
+  // Metadata failure surface (metadata-panel/01): null while parsing or on
+  // success; the panel's error message when the current photo has no usable
+  // metadata. Drives the degrade banner — the photo still renders, but the
+  // greyed-out dist/annotation/measure affordances are never unexplained.
+  const [metaError, setMetaError] = useState<string | null>(null);
+
   // --- Reference layers (.scratch/reference-layers/spec.md §Client
   // behavior, tickets 02/03) --- Read-only external GeoJSON mirrored by the
   // dev server. Fetched on mount and refetched on the server's
@@ -189,6 +195,7 @@ export default function App() {
     setCaptureTime(null);
     setRelAlt(null);
     setGpsFix(null);
+    setMetaError(null);
     setDraftVerts([]);
     setDraftErrs([]);
     setSelectedId(null);
@@ -767,6 +774,11 @@ export default function App() {
       <div className="viewer-wrap">
         <div ref={containerRef} className="viewer" />
         {title !== "" && <div className="title-banner">{title}</div>}
+        {metaError !== null && (
+          <div className="meta-warn" role="alert">
+            ⚠ metadata unavailable — dist / annotations / measure disabled
+          </div>
+        )}
         {panoramaUrl !== null && (
           <div className={rejectActive ? "reticle reject" : "reticle"} aria-hidden="true" />
         )}
@@ -799,6 +811,7 @@ export default function App() {
             onCaptureTime={setCaptureTime}
             onRelativeAltitude={setRelAlt}
             onGpsFix={setGpsFix}
+            onMetadataError={setMetaError}
             northOffset={northOffset}
             onNorthOffsetChange={changeNorthOffset}
           />

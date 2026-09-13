@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import exifr from "exifr";
 import type { CameraFix } from "../lib/copy-record";
+import { parseImageMeta, type Meta } from "../lib/metadata";
 
 export interface MetadataPanelProps {
   imageUrl: string;
@@ -10,26 +10,12 @@ export interface MetadataPanelProps {
   onRelativeAltitude?: (m: number | null) => void;
   /** Fires once per parse with the camera GPS fix (EXIF/XMP lat/lon + RTK σ when present), null when absent. */
   onGpsFix?: (fix: CameraFix | null) => void;
+  /** Fires once per parse: the error message when no usable metadata was found, null on success (drives App's degrade banner). */
+  onMetadataError?: (message: string | null) => void;
   /** App-wide north offset in degrees (ticket 02); rendered as an editable row. */
   northOffset: number;
   onNorthOffsetChange: (deg: number) => void;
 }
-
-type Meta = Record<string, unknown>;
-
-/** drone-dji XMP keys used to detect whether exifr surfaced the DJI block. */
-const DJI_KEYS = [
-  "GimbalPitchDegree",
-  "GimbalYawDegree",
-  "GimbalRollDegree",
-  "FlightPitchDegree",
-  "FlightYawDegree",
-  "FlightRollDegree",
-  "AbsoluteAltitude",
-  "RelativeAltitude",
-  "GpsStatus",
-  "UTCAtExposure",
-] as const;
 
 /* ---------- formatting ---------- */
 
@@ -81,38 +67,6 @@ const localTime = (v: unknown): string | null => {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? null : d.toLocaleString(undefined, { hour12: false });
 };
-
-/* ---------- XMP fallback (fetch raw bytes → regex over the XMP packet) ---------- */
-
-function coerceNum(out: Meta, key: string, raw: string): void {
-  const v = raw.trim();
-  out[key] = /^[-+]?\d+(?:\.\d+)?$/.test(v) ? Number(v) : v;
-}
-
-/**
- * exifr normally surfaces every `drone-dji:*` attribute at the top level
- * (verified against a Matrice 4T pano); this is the safety net for files
- * where it does not: pull the JPEG and regex the XMP packet directly.
- */
-async function extractDjiXmp(url: string): Promise<Meta> {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`fetch failed: HTTP ${res.status}`);
-  const text = new TextDecoder("latin1").decode(await res.arrayBuffer());
-  const start = text.indexOf("<x:xmpmeta");
-  const end = text.indexOf("</x:xmpmeta>");
-  if (start < 0 || end < 0) return {};
-  const xmp = text.slice(start, end);
-  const out: Meta = {};
-  // Adobe packet form: drone-dji:Key="value"
-  for (const m of xmp.matchAll(/\bdrone-dji:([A-Za-z0-9_]+)\s*=\s*"([^"]*)"/g)) {
-    coerceNum(out, m[1], m[2]);
-  }
-  // RDF element form: <drone-dji:Key>value</drone-dji:Key>
-  for (const m of xmp.matchAll(/<drone-dji:([A-Za-z0-9_]+)>([^<]*)<\/drone-dji:\1>/g)) {
-    if (!(m[1] in out)) coerceNum(out, m[1], m[2]);
-  }
-  return out;
-}
 
 /* ---------- grouping ---------- */
 
@@ -243,6 +197,7 @@ export default function MetadataPanel({
   onCaptureTime,
   onRelativeAltitude,
   onGpsFix,
+  onMetadataError,
   northOffset,
   onNorthOffsetChange,
 }: MetadataPanelProps) {
@@ -257,35 +212,30 @@ export default function MetadataPanel({
     setError(null);
     setMeta(null);
     (async () => {
-      // const snapshot keeps TS's null-narrowing alive inside the .some() closure
-      const exifrOut = await exifr.parse(imageUrl, { xmp: true, gps: true }).catch(() => null);
-      let m: Meta | null = exifrOut;
-      if (exifrOut === null || !DJI_KEYS.some((k) => k in exifrOut)) {
-        try {
-          const xmp = await extractDjiXmp(imageUrl);
-          m = Object.keys(xmp).length > 0 ? { ...xmp, ...m } : m;
-        } catch {
-          /* keep whatever exifr produced */
-        }
-      }
+      // parseImageMeta never throws (sync throws and undefined results
+      // settle to null) — the panel always leaves the loading state.
+      const m = await parseImageMeta(imageUrl);
       if (cancelled) return;
       if (m === null || Object.keys(m).length === 0) {
-        setError("No EXIF/XMP metadata found in this file.");
+        const msg = "No EXIF/XMP metadata found in this file.";
+        setError(msg);
         onCaptureTime?.(null);
         onRelativeAltitude?.(null);
         onGpsFix?.(null);
+        onMetadataError?.(msg);
       } else {
         setMeta(m);
         onCaptureTime?.(str(m.UTCAtExposure) ?? stamp(m.DateTimeOriginal));
         onRelativeAltitude?.(num(m.RelativeAltitude));
         onGpsFix?.(gpsFixFrom(m));
+        onMetadataError?.(null);
       }
       setLoading(false);
     })();
     return () => {
       cancelled = true;
     };
-  }, [imageUrl, onCaptureTime, onRelativeAltitude, onGpsFix]);
+  }, [imageUrl, onCaptureTime, onRelativeAltitude, onGpsFix, onMetadataError]);
 
   const groups = meta === null ? [] : buildGroups(meta);
   const fileName = decodeURIComponent(imageUrl.split("/").pop() ?? imageUrl);
