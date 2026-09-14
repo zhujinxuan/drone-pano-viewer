@@ -3,7 +3,7 @@
  * §Client behavior, ticket 03).
  *
  * The server prefilter bounds the data extent at load time (whole-feature
- * inclusion in the 1 km circle union around every positioned pano); this
+ * inclusion in the 600 m circle union around every positioned pano); this
  * module is the per-photo render half: a feature is NOT drawn when every
  * vertex is more than {@link CULL_RADIUS_M} from the current camera. The
  * rule is strictly vertex-based — a long edge whose interior passes near the
@@ -14,14 +14,14 @@
  * Distances use `vincentyInverse` (geodesy.ts, GeodTest-verified) rather
  * than the overlay's linearized `vertexView` math: the cull runs once per
  * vertex per rebuild over a small prefiltered set, and the spec pins the
- * 1100 m threshold to ground-truth geodesics.
+ * 700 m threshold to ground-truth geodesics.
  */
 import { vincentyInverse } from "./geodesy.ts";
 import { mPerDegLat, mPerDegLon } from "./reference-layers.ts";
 import type { RefGeometry, RefPosition } from "./reference-layers.ts";
 
-/** Spec: features with every vertex > 1100 m from the camera are not drawn. */
-export const CULL_RADIUS_M = 1100;
+/** Spec: features with every vertex > 700 m from the camera are not drawn. */
+export const CULL_RADIUS_M = 700;
 
 /** Camera ground position — the `{ lat, lon }` slice of `OverlayCam`. */
 export interface CullCam {
@@ -118,7 +118,7 @@ const RAD = Math.PI / 180;
  * includes single polygons with ~900 km bboxes and ~100 k vertices — a
  * feature-level band alone still floods the Vincenty loop); only vertices
  * that survive planar rejection get the exact Vincenty check, so the
- * spec-pinned 1100 m threshold stays geodesic-exact.
+ * spec-pinned 700 m threshold stays geodesic-exact.
  */
 export function entryIsCulled(
   cam: CullCam,

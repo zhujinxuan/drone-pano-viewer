@@ -1,6 +1,6 @@
 /**
  * Pure reference-layer model: repeatable `--layer` CLI flag parsing, lenient
- * GeoJSON load, the 1 km circle-union prefilter, and the per-file watch
+ * GeoJSON load, the 600 m circle-union prefilter, and the per-file watch
  * state machine (debounce/retry/last-good transitions live here; the fs,
  * timer, and ws wiring lives in vite.config.ts).
  *
@@ -18,7 +18,7 @@
  * km of a pano, growing to ≈ 0.5% of distance for very long far segments
  * (≲ 5 m at 1 km, ≲ 100 m for a 50 km edge) — immaterial to whole-feature
  * inclusion (no clipping, geometry untouched) and covered downstream by the
- * 1100 m per-pano render cull. Antimeridian-spanning sites are out of scope.
+ * 700 m per-pano render cull. Antimeridian-spanning sites are out of scope.
  */
 import type { LonLat } from "./geohash.ts";
 import type { PhotoEntry } from "./types.ts";
@@ -394,7 +394,7 @@ function intersectsUnion(f: RefFeature, centers: readonly LonLat[], radiusM: num
 export function filterByCircleUnion(
   features: readonly RefFeature[],
   centers: readonly LonLat[],
-  radiusM = 1000,
+  radiusM = 600,
 ): RefFeature[] {
   return features.filter((f) => intersectsUnion(f, centers, radiusM));
 }

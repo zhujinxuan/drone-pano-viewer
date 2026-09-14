@@ -17,7 +17,7 @@
  * writes, no per-frame React state). Point dots reuse the annotation dot
  * texture construction (kept local — AnnotationOverlay does not export it).
  *
- * Per-pano cull (`lib/reference-cull`): a feature with every vertex > 1100 m
+ * Per-pano cull (`lib/reference-cull`): a feature with every vertex > 700 m
  * from the camera is not drawn; vertex-based, no clipping. `cam === null`
  * (`nogps-*` / altitude-less photos) renders nothing.
  *

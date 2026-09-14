@@ -363,10 +363,10 @@ describe("filterByCircleUnion", () => {
 
   it("includes a point inside a circle and excludes one outside", () => {
     const inPt = load({ type: "FeatureCollection", features: [
-      { type: "Feature", geometry: { type: "Point", coordinates: at(90, 950) }, properties: {} },
+      { type: "Feature", geometry: { type: "Point", coordinates: at(90, 550) }, properties: {} },
     ] });
     const outPt = load({ type: "FeatureCollection", features: [
-      { type: "Feature", geometry: { type: "Point", coordinates: at(90, 1050) }, properties: {} },
+      { type: "Feature", geometry: { type: "Point", coordinates: at(90, 650) }, properties: {} },
     ] });
     const kept = filterByCircleUnion(inPt, CENTER);
     expect(kept).toEqual(inPt);
@@ -380,9 +380,10 @@ describe("filterByCircleUnion", () => {
     ] });
     expect(filterByCircleUnion(crossing, CENTER)).toEqual(crossing);
 
-    // parallel chord whose closest approach is ~1200 m — vertices ~1697 m out, no crossing
+    // parallel chord whose closest approach is ~700 m — vertices ~990 m out, no
+    // crossing (inside the old 1 km radius, outside the current 600 m — ticket 12)
     const chord = load({ type: "FeatureCollection", features: [
-      { type: "Feature", geometry: { type: "LineString", coordinates: [at(45, 1697), at(135, 1697)] }, properties: {} },
+      { type: "Feature", geometry: { type: "LineString", coordinates: [at(45, 990), at(135, 990)] }, properties: {} },
     ] });
     expect(filterByCircleUnion(chord, CENTER)).toEqual([]);
   });
@@ -392,10 +393,10 @@ describe("filterByCircleUnion", () => {
       load({ type: "FeatureCollection", features: [
         { type: "Feature", geometry: { type: "Polygon", coordinates: [[at(0, d), at(90, d), at(180, d), at(270, d), at(0, d)]] }, properties: {} },
       ] });
-    // vertices 1300 m out, edges pass at 1300·cos45° ≈ 919 m — edge-clip only
-    expect(filterByCircleUnion(diamond(1300), CENTER)).toEqual(diamond(1300));
-    // vertices 2000 m out, edges at ≈ 1414 m — fully outside
-    expect(filterByCircleUnion(diamond(2000), CENTER)).toEqual([]);
+    // vertices 700 m out, edges pass at 700·cos45° ≈ 495 m — edge-clip only
+    expect(filterByCircleUnion(diamond(700), CENTER)).toEqual(diamond(700));
+    // vertices 1300 m out, edges at ≈ 919 m — fully outside
+    expect(filterByCircleUnion(diamond(1300), CENTER)).toEqual([]);
   });
 
   it("tests the ring's closing edge — including when it is the only hit", () => {
@@ -426,9 +427,9 @@ describe("filterByCircleUnion", () => {
     const east3k = vincentyDirect(LAT, LON, 90, 3000);
     const centers = [{ lon: LON, lat: LAT }, { lon: east3k.lon, lat: east3k.lat }];
 
-    const nearB = atFrom({ lon: east3k.lon, lat: east3k.lat }, 90, 800); // only in B's circle
+    const nearB = atFrom({ lon: east3k.lon, lat: east3k.lat }, 90, 500); // only in B's circle
     const midway = at(90, 1500); // 1500 m from both A and B — the union gap
-    const nearA = at(270, 950);
+    const nearA = at(270, 550);
     const features = load({ type: "FeatureCollection", features: [
       { type: "Feature", geometry: { type: "Point", coordinates: nearB }, properties: { which: "nearB" } },
       { type: "Feature", geometry: { type: "Point", coordinates: midway }, properties: { which: "midway" } },

@@ -18,7 +18,7 @@ Show **externally-owned** geo data — turbine foundations, sensitive/avoidance 
 ## Server endpoint & prefilter (vite.config.ts middleware)
 
 - `GET /api/reference-layers` → `{ layers: [{ name, color, labelProp, status, dropped, features: FeatureCollection }] }`, `status: "ok" | "invalid" | "missing"`; `dropped` counts the features/parts the load rejected.
-- **Prefilter at load**: union of 1 km-radius circles around every pano in the served photos-dir (geohash8-decoded positions; `nogps-*` skipped — playlist is a review restriction, not a data extent). A feature is included **whole** if it intersects the union: Point = inside any circle; LineString/Polygon = any vertex inside any circle **or** any segment's min distance to a circle center ≤ radius (vertices alone miss edge-clips). No clipping — geometry is never altered.
+- **Prefilter at load**: union of 600 m-radius circles around every pano in the served photos-dir (geohash8-decoded positions; `nogps-*` skipped — playlist is a review restriction, not a data extent). A feature is included **whole** if it intersects the union: Point = inside any circle; LineString/Polygon = any vertex inside any circle **or** any segment's min distance to a circle center ≤ radius (vertices alone miss edge-clips). No clipping — geometry is never altered. (Radius was 1 km until ticket 12.)
 - Lenient load, lossless pass-through: unknown feature properties preserved verbatim; bare Feature/geometry accepted by wrapping. Multipart geometries (MultiPoint/MultiLineString/MultiPolygon/GeometryCollection, nested arbitrarily) are flattened at load into one single-geometry Feature per part, each sharing the parent feature's properties — a dissolved-MultiPolygon layer loads instead of silently serving 0 features. Structurally invalid features and parts that fail the position/ring checks are counted in `dropped` while their valid siblings still load; `dropped > 0` shows the toolbar ⚠ on a still-`ok` layer.
 
 ## Watch semantics (the live-update mechanism — no CRUD API)
@@ -38,7 +38,7 @@ Show **externally-owned** geo data — turbine foundations, sensitive/avoidance 
   - Point → sprite dot in layer color + DOM label (same per-frame projection as annotation labels).
   - LineString → projected polyline. Polygon → boundary polyline + translucent fill (~15% opacity) via the existing triangulation approach.
   - **Render decimation** (ticket 11): a feature whose rings total > 1000 vertices is Douglas-Peucker-decimated in projected (yaw, pitch) space before any GPU work — ε = 2e-4 rad (sub-pixel) for strokes, 5× that for fills (the stroke draws the true edge; the fill may wobble beneath it). The decision is per FEATURE — undecimated "small" rings of a 900-ring dissolved union would still total ~54 k fill vertices and turn earcut's hole-bridging quadratic (measured: 2.0 s → 32 ms triangulation on the reporter's 68 k-vertex polygon). Data and the cull are untouched; decimation is render-only and visually bounded.
-  - **Per-pano cull**: features with every vertex > 1100 m from the current camera are not rendered (prefilter is load-time data extent; cull is per-photo render hygiene). Vertex-based, Vincenty-exact. Implementation (ticket 10): per-feature vertices+bbox cached by feature identity; three-tier reject — bbox planar (underestimating, 100 m margin) → per-vertex planar → Vincenty confirm only in-band; verdicts identical to the exact path. Polygon fill triangulation (earcut face indices) is likewise cached per feature — cam changes only recompute vertex positions, never topology.
+  - **Per-pano cull**: features with every vertex > 700 m from the current camera are not rendered (prefilter is load-time data extent; cull is per-photo render hygiene; 700 = prefilter 600 + 100 m margin so the client never keeps what the server could have dropped). Vertex-based, Vincenty-exact. Implementation (ticket 10): per-feature vertices+bbox cached by feature identity; three-tier reject — bbox planar (underestimating, 100 m margin) → per-vertex planar → Vincenty confirm only in-band; verdicts identical to the exact path. Polygon fill triangulation (earcut face indices) is likewise cached per feature — cam changes only recompute vertex positions, never topology.
 - **Layer toolbar**: foldable + draggable floating panel (drag by header; position + fold persisted in localStorage). One row per layer: color swatch, name, visibility checkbox (all visible by default), feature count, warning glyph when `status != "ok"` (tooltip explains).
 - **Click-inspect**: clicking a reference feature opens a small dismissable readout (layer name + properties table; Esc or click-elsewhere closes). Read-only — no editing affordances.
 
@@ -58,7 +58,7 @@ Show **externally-owned** geo data — turbine foundations, sensitive/avoidance 
 
 ## Non-goals (v1)
 
-GPKG input, in-viewer editing of reference features, CRUD API, geometric clipping at the 1 km boundary, per-vertex culling, multi-segment measure paths, persisting measurements, style config file, cross-layer feature dedup.
+GPKG input, in-viewer editing of reference features, CRUD API, geometric clipping at the 600 m boundary, per-vertex culling, multi-segment measure paths, persisting measurements, style config file, cross-layer feature dedup.
 
 ## Tickets
 

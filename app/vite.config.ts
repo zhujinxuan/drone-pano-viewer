@@ -221,7 +221,7 @@ const RETRY_AFTER_MS = 300;
  *    reloads through the shared watch path (spec §Watch semantics): a lost
  *    watch event can't outlive one request. Files with a debounce/retry
  *    timer pending are left to the watcher. Each layer's features are
- *    whole-included by the union of 1 km circles around every positioned
+ *    whole-included by the union of 600 m circles around every positioned
  *    pano of the served dir — the full scan, not the playlist (a playlist is
  *    a review restriction, not a data extent). No clipping: features pass
  *    through verbatim. The union is recomputed on each watch reload, so

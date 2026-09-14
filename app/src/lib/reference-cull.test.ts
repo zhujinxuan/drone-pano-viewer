@@ -11,9 +11,10 @@ import {
 } from "./reference-cull.ts";
 
 // Spec: .scratch/reference-layers/spec.md §Client behavior (per-pano cull),
-// ticket 03. Vertex-based rule: a feature is culled only when EVERY vertex is
-// more than 1100 m from the current camera (load-time prefilter already
-// bounded the data extent; this is per-photo render hygiene, no clipping).
+// ticket 03 (radius 700 m since ticket 12). Vertex-based rule: a feature is
+// culled only when EVERY vertex is more than 700 m from the current camera
+// (load-time prefilter already bounded the data extent; this is per-photo
+// render hygiene, no clipping).
 // Ground-truth positions come from vincentyDirect (GeodTest-verified oracle,
 // same approach as reference-layers.test.ts) — threshold tests use ±5 m
 // margins, far above the ≈1 cm error of the 7-dp toFixed round-trip.
@@ -53,7 +54,7 @@ describe("featureIsCulled", () => {
     expect(featureIsCulled(CAM, [at(0, 400), at(180, 2000)])).toBe(false);
     expect(featureIsCulled(CAM, [at(0, 400)])).toBe(false);
   });
-  it("splits at the 1100 m threshold (inside keeps, just beyond culls)", () => {
+  it("splits at the 700 m threshold (inside keeps, just beyond culls)", () => {
     expect(featureIsCulled(CAM, [at(90, CULL_RADIUS_M - 5)])).toBe(false);
     expect(featureIsCulled(CAM, [at(90, CULL_RADIUS_M + 5)])).toBe(true);
   });
@@ -63,8 +64,8 @@ describe("featureIsCulled", () => {
     expect(featureIsCulled(CAM, [at(0, 1200), at(90, 1300), at(180, 1500)])).toBe(true);
   });
 
-  it("uses the 1100 m spec radius by default and honors an override", () => {
-    expect(CULL_RADIUS_M).toBe(1100);
+  it("uses the 700 m spec radius by default and honors an override", () => {
+    expect(CULL_RADIUS_M).toBe(700);
     expect(featureIsCulled(CAM, [at(0, 1200)], 1500)).toBe(false);
   });
 
@@ -98,7 +99,7 @@ describe("cullEntry", () => {
 });
 
 describe("entryIsCulled", () => {
-  it("agrees with the exact path at the 1100 m threshold", () => {
+  it("agrees with the exact path at the 700 m threshold", () => {
     // Just inside / just outside / inside the 100 m safety band around the
     // threshold — the band cases must fall through to Vincenty, not guess.
     for (const dist of [CULL_RADIUS_M - 5, CULL_RADIUS_M + 5, CULL_RADIUS_M + 50]) {
