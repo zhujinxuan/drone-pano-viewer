@@ -129,16 +129,16 @@ describe("parseReferenceGeoJSON", () => {
 
   it("drops structurally invalid features from a collection but keeps the rest", () => {
     const bad = [
-      { type: "Feature", geometry: { type: "MultiPoint", coordinates: [[1, 2]] }, properties: {} },
       { type: "Feature", geometry: null, properties: {} },
       { type: "Feature", properties: {} },
       { type: "Feature", geometry: { type: "Point", coordinates: "1,2" }, properties: {} },
       { type: "Feature", geometry: { type: "LineString", coordinates: [[1, 2]] }, properties: {} }, // 1-vertex line
       { type: "Point", coordinates: [1, 2] }, // bare geometry inside features[]
     ];
-    const { status, features } = parseReferenceGeoJSON({ type: "FeatureCollection", features: [point, ...bad] });
+    const { status, features, dropped } = parseReferenceGeoJSON({ type: "FeatureCollection", features: [point, ...bad] });
     expect(status).toBe("ok");
     expect(features).toEqual([point]);
+    expect(dropped).toBe(bad.length); // one count per member that produced zero valid features
   });
 
   it("accepts a bare Feature by wrapping it into a one-element collection", () => {
@@ -167,6 +167,151 @@ describe("parseReferenceGeoJSON", () => {
     expect(features).toEqual([triangle]);
   });
 
+  it("flattens a MultiPolygon into one Polygon feature per polygon, sharing the parent's properties", () => {
+    const polyA = [[[0, 0], [1, 0], [1, 1], [0, 0]]];
+    const polyB = [
+      [[2, 2], [3, 2], [3, 3], [2, 2]],
+      [[2.4, 2.4], [2.6, 2.4], [2.6, 2.6], [2.4, 2.4]], // hole rides along — rings kept whole
+    ];
+    const feature = {
+      type: "Feature",
+      id: "avoid-1",
+      geometry: { type: "MultiPolygon", coordinates: [polyA, polyB] },
+      properties: { kind: "hard" },
+    };
+    const { status, features, dropped } = parseReferenceGeoJSON({ type: "FeatureCollection", features: [feature] });
+    expect(status).toBe("ok");
+    expect(dropped).toBe(0);
+    expect(features).toHaveLength(2);
+    expect(features.map((f) => f.geometry)).toEqual([
+      { type: "Polygon", coordinates: polyA },
+      { type: "Polygon", coordinates: polyB },
+    ]);
+    expect(features[0]?.properties).toBe(feature.properties); // properties shared by reference
+    expect(features[1]?.properties).toBe(feature.properties);
+    expect(features.map((f) => f.id)).toEqual(["avoid-1", "avoid-1"]); // foreign members preserved
+    expect(features[0]?.geometry.coordinates).toBe(polyA); // coordinate arrays by reference, never copied
+  });
+
+  it("flattens MultiLineString and MultiPoint into one feature per part", () => {
+    const lines = [[[0, 0], [0, 1]], [[1, 1], [2, 2], [3, 2]]];
+    const positions = [[5, 5], [6, 6]];
+    const { status, features, dropped } = parseReferenceGeoJSON({
+      type: "FeatureCollection",
+      features: [
+        { type: "Feature", geometry: { type: "MultiLineString", coordinates: lines }, properties: { a: 1 } },
+        { type: "Feature", geometry: { type: "MultiPoint", coordinates: positions }, properties: { b: 2 } },
+      ],
+    });
+    expect(status).toBe("ok");
+    expect(dropped).toBe(0);
+    expect(features.map((f) => [f.geometry.type, f.properties])).toEqual([
+      ["LineString", { a: 1 }],
+      ["LineString", { a: 1 }],
+      ["Point", { b: 2 }],
+      ["Point", { b: 2 }],
+    ]);
+    expect(features[0]?.geometry.coordinates).toBe(lines[0]); // part arrays by reference (foreign z/M ride along)
+    expect(features[3]?.geometry.coordinates).toBe(positions[1]);
+  });
+
+  it("recurses into GeometryCollection, including Multi* nested inside", () => {
+    const { status, features, dropped } = parseReferenceGeoJSON({
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          geometry: {
+            type: "GeometryCollection",
+            geometries: [
+              { type: "Point", coordinates: [0, 0] },
+              { type: "GeometryCollection", geometries: [{ type: "MultiPoint", coordinates: [[1, 1], [2, 2]] }] },
+              { type: "LineString", coordinates: [[3, 3], [4, 4]] },
+            ],
+          },
+          properties: { src: "gc" },
+        },
+      ],
+    });
+    expect(status).toBe("ok");
+    expect(dropped).toBe(0);
+    expect(features.map((f) => f.geometry.type)).toEqual(["Point", "Point", "Point", "LineString"]);
+    for (const f of features) expect(f.properties).toEqual({ src: "gc" });
+  });
+
+  it("counts an invalid part inside a Multi as dropped while its valid siblings load", () => {
+    const good = [[[0, 0], [1, 0], [1, 1], [0, 0]]];
+    const { status, features, dropped } = parseReferenceGeoJSON({
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          geometry: {
+            type: "MultiPolygon",
+            coordinates: [good, [[[2, 2], [3, "x"]]], "not-a-polygon"], // bad position; not an array at all
+          },
+          properties: {},
+        },
+      ],
+    });
+    expect(status).toBe("ok");
+    expect(dropped).toBe(2);
+    expect(features).toHaveLength(1);
+    expect(features[0]?.geometry).toEqual({ type: "Polygon", coordinates: good });
+  });
+
+  it("loads a dissolved-MultiPolygon-only collection (ticket 07 scenario) instead of silently serving 0 features", () => {
+    const { status, features, dropped } = parseReferenceGeoJSON({
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          geometry: {
+            type: "MultiPolygon",
+            coordinates: [
+              [[[113.26, 23.3], [120, 25], [118, 30], [113.26, 23.3]]],
+              [[[123.93, 44.56], [124, 44.6], [123.8, 44.6], [123.93, 44.56]]],
+            ],
+          },
+          properties: { zone: "avoid" },
+        },
+      ],
+    });
+    expect(status).toBe("ok");
+    expect(dropped).toBe(0);
+    expect(features).toHaveLength(2);
+    expect(features.every((f) => f.geometry.type === "Polygon")).toBe(true);
+  });
+
+  it("flattens a bare Feature and a bare multipart geometry the same way", () => {
+    const feature = {
+      type: "Feature",
+      geometry: { type: "MultiPoint", coordinates: [[1, 2], [3, 4]] },
+      properties: { p: 1 },
+    };
+    expect(parseReferenceGeoJSON(feature)).toEqual({
+      status: "ok",
+      dropped: 0,
+      features: [
+        { type: "Feature", geometry: { type: "Point", coordinates: [1, 2] }, properties: { p: 1 } },
+        { type: "Feature", geometry: { type: "Point", coordinates: [3, 4] }, properties: { p: 1 } },
+      ],
+    });
+    const bare = { type: "MultiLineString", coordinates: [[[0, 0], [0, 1]]] };
+    const wrapped = parseReferenceGeoJSON(bare);
+    expect(wrapped.status).toBe("ok");
+    expect(wrapped.dropped).toBe(0);
+    expect(wrapped.features).toHaveLength(1);
+    expect(wrapped.features[0]?.properties).toEqual({}); // bare geometry wraps with {}
+    expect(wrapped.features[0]?.geometry.coordinates).toBe(bare.coordinates[0]);
+  });
+
+  it("keeps a bare input whose parts all fail validation invalid, as before", () => {
+    expect(
+      parseReferenceGeoJSON({ type: "Feature", geometry: { type: "MultiPoint", coordinates: [["x"]] }, properties: {} }),
+    ).toEqual({ status: "invalid", features: [], dropped: 0 });
+  });
+
   it("reports invalid for anything that is not recognizable GeoJSON, never throwing", () => {
     const garbage: unknown[] = [
       42,
@@ -176,11 +321,10 @@ describe("parseReferenceGeoJSON", () => {
       {},
       { type: "FeatureCollection", features: "x" },
       { type: "Point", coordinates: "x" }, // bare geometry with bad coordinates
-      { type: "Feature", geometry: { type: "MultiPoint", coordinates: [[1, 2]] }, properties: {} },
       { hello: 1 },
     ];
     for (const input of garbage) {
-      expect(parseReferenceGeoJSON(input)).toEqual({ status: "invalid", features: [] });
+      expect(parseReferenceGeoJSON(input)).toEqual({ status: "invalid", features: [], dropped: 0 });
     }
   });
 });
@@ -349,9 +493,14 @@ const farPt: RefFeature = {
 };
 
 /** A watch-state literal built independently of createLayerState (no tautology). */
-function watchState(status: "ok" | "invalid" | "missing", features: RefFeature[], retryPending = false): RefLayerState {
+function watchState(
+  status: "ok" | "invalid" | "missing",
+  features: RefFeature[],
+  retryPending = false,
+  dropped = 0,
+): RefLayerState {
   return {
-    payload: { name: "a", color: "#e69f00", labelProp: null, status, features: { type: "FeatureCollection", features } },
+    payload: { name: "a", color: "#e69f00", labelProp: null, status, dropped, features: { type: "FeatureCollection", features } },
     retryPending,
   };
 }
@@ -364,6 +513,7 @@ describe("createLayerState", () => {
         color: "#e69f00",
         labelProp: null,
         status: "missing",
+        dropped: 0,
         features: { type: "FeatureCollection", features: [] },
       },
       retryPending: false,
@@ -374,7 +524,7 @@ describe("createLayerState", () => {
 describe("acceptLayerProbe", () => {
   const C = [{ lon: LON, lat: LAT }];
   it("replaces the payload whole, re-filtered by the circle union, on a successful parse", () => {
-    const t = acceptLayerProbe(watchState("ok", [nearPt]), { read: "ok", features: [nearPt, nearPtB, farPt] }, C);
+    const t = acceptLayerProbe(watchState("ok", [nearPt]), { read: "ok", features: [nearPt, nearPtB, farPt], dropped: 0 }, C);
     expect(t.state).toEqual(watchState("ok", [nearPt, nearPtB])); // farPt excluded by the union
     expect(t.changed).toBe(true);
     expect(t.invalid).toBe(false);
@@ -406,14 +556,14 @@ describe("acceptLayerProbe", () => {
   it("recovers transparently when the retry reads a fixed file (mid-write protection)", () => {
     const deferred = acceptLayerProbe(watchState("ok", [nearPt]), { read: "error", message: "half-written" }, C);
     expect(deferred.changed).toBe(false);
-    const t = acceptLayerProbe(deferred.state, { read: "ok", features: [nearPt, nearPtB] }, C);
+    const t = acceptLayerProbe(deferred.state, { read: "ok", features: [nearPt, nearPtB], dropped: 0 }, C);
     expect(t.state).toEqual(watchState("ok", [nearPt, nearPtB]));
     expect(t.changed).toBe(true);
     expect(t.invalid).toBe(false);
   });
 
   it("recovers invalid → ok with a full replace", () => {
-    const t = acceptLayerProbe(watchState("invalid", [nearPt]), { read: "ok", features: [nearPtB] }, C);
+    const t = acceptLayerProbe(watchState("invalid", [nearPt]), { read: "ok", features: [nearPtB], dropped: 0 }, C);
     expect(t.state).toEqual(watchState("ok", [nearPtB]));
     expect(t.changed).toBe(true);
   });
@@ -428,15 +578,36 @@ describe("acceptLayerProbe", () => {
   });
 
   it("re-adds as ok after missing (an absent file appearing under watch)", () => {
-    const t = acceptLayerProbe(watchState("missing", []), { read: "ok", features: [nearPt] }, C);
+    const t = acceptLayerProbe(watchState("missing", []), { read: "ok", features: [nearPt], dropped: 0 }, C);
     expect(t.state).toEqual(watchState("ok", [nearPt]));
     expect(t.changed).toBe(true);
   });
 
   it("emits nothing for a rewrite that changes nothing", () => {
-    const t = acceptLayerProbe(watchState("ok", [nearPt]), { read: "ok", features: [nearPt] }, C);
+    const t = acceptLayerProbe(watchState("ok", [nearPt]), { read: "ok", features: [nearPt], dropped: 0 }, C);
     expect(t.state).toEqual(watchState("ok", [nearPt]));
     expect(t.changed).toBe(false);
+  });
+
+  it("carries the probe's dropped count; a dropped-only change still emits, missing resets to 0", () => {
+    const bumped = acceptLayerProbe(watchState("ok", [nearPt]), { read: "ok", features: [nearPt], dropped: 2 }, C);
+    expect(bumped.state.payload.dropped).toBe(2);
+    expect(bumped.changed).toBe(true); // identical filtered features — dropped alone forces the push
+    const again = acceptLayerProbe(bumped.state, { read: "ok", features: [nearPt], dropped: 2 }, C);
+    expect(again.changed).toBe(false); // nothing moved — no spurious refetch pushes
+    const gone = acceptLayerProbe(bumped.state, { read: "missing" }, C);
+    expect(gone.state.payload.status).toBe("missing");
+    expect(gone.state.payload.dropped).toBe(0);
+  });
+
+  it("keeps the last-good dropped count across a deferral and a terminal error", () => {
+    const loaded = acceptLayerProbe(watchState("ok", [nearPt]), { read: "ok", features: [nearPt], dropped: 2 }, C).state;
+    const deferred = acceptLayerProbe(loaded, { read: "error", message: "half-written" }, C);
+    expect(deferred.state.payload.dropped).toBe(2); // deferral leaves the payload untouched
+    const terminal = acceptLayerProbe(deferred.state, { read: "error", message: "still bad" }, C);
+    expect(terminal.state.payload.status).toBe("invalid");
+    expect(terminal.state.payload.dropped).toBe(2); // last-good count survives the terminal flip
+    expect(terminal.changed).toBe(true); // status ok → invalid
   });
 });
 
@@ -627,8 +798,8 @@ describe("GET /api/reference-layers (boot state)", () => {
     // and the edge-crossing line survive the union prefilter, both whole.
     expect(get(handler)).toEqual({
       layers: [
-        { name: "a", color: "#e69f00", labelProp: "tid", status: "ok", features: { type: "FeatureCollection", features: [nearA] } },
-        { name: "b", color: "#0072b2", labelProp: null, status: "ok", features: { type: "FeatureCollection", features: [crossing] } },
+        { name: "a", color: "#e69f00", labelProp: "tid", status: "ok", dropped: 0, features: { type: "FeatureCollection", features: [nearA] } },
+        { name: "b", color: "#0072b2", labelProp: null, status: "ok", dropped: 0, features: { type: "FeatureCollection", features: [crossing] } },
       ],
     });
   });
@@ -640,7 +811,7 @@ describe("GET /api/reference-layers (boot state)", () => {
     ]);
     const { handler } = start();
     expect(get(handler)).toEqual({
-      layers: [{ name: "gone", color: "#e69f00", labelProp: null, status: "missing", features: { type: "FeatureCollection", features: [] } }],
+      layers: [{ name: "gone", color: "#e69f00", labelProp: null, status: "missing", dropped: 0, features: { type: "FeatureCollection", features: [] } }],
     });
     expect(console.warn).not.toHaveBeenCalled();
   });
@@ -654,7 +825,7 @@ describe("GET /api/reference-layers (boot state)", () => {
     ]);
     const { handler } = start();
     expect(get(handler)).toEqual({
-      layers: [{ name: "bad", color: "#e69f00", labelProp: null, status: "invalid", features: { type: "FeatureCollection", features: [] } }],
+      layers: [{ name: "bad", color: "#e69f00", labelProp: null, status: "invalid", dropped: 0, features: { type: "FeatureCollection", features: [] } }],
     });
     expect(console.warn).toHaveBeenCalled();
   });
@@ -670,7 +841,7 @@ describe("GET /api/reference-layers (boot state)", () => {
     process.env.PANO_REFERENCE_LAYERS = JSON.stringify([{ name: "a", path: f, color: "#e69f00", labelProp: null }]);
     const { handler } = start();
     expect(get(handler)).toEqual({
-      layers: [{ name: "a", color: "#e69f00", labelProp: null, status: "ok", features: { type: "FeatureCollection", features: [] } }],
+      layers: [{ name: "a", color: "#e69f00", labelProp: null, status: "ok", dropped: 0, features: { type: "FeatureCollection", features: [] } }],
     });
   });
 
@@ -851,6 +1022,110 @@ describe("reference layer watch (ticket 02)", () => {
     const layers = get(ctx.handler).layers;
     expect(layers.map((l) => l.status)).toEqual(["ok", "ok"]);
     expect(layers.map((l) => l.features.features)).toEqual([[nearPtB], [nearPtB]]);
+    expect(ctx.ws.sent).toEqual(["reference-layers:changed"]);
+  });
+});
+
+describe("request-time mtime safety net (ticket 08)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const write = (file: string, features: RefFeature[]) =>
+    fs.writeFileSync(file, JSON.stringify({ type: "FeatureCollection", features }));
+
+  /** Write each sheet's file (unless absent-at-boot), set the env, boot the plugin. */
+  function bootLayers(sheets: Array<{ name: string; file: string; features?: RefFeature[] }>) {
+    process.env.PANO_PHOTOS_DIR = panoDir();
+    for (const s of sheets) if (s.features) write(s.file, s.features);
+    process.env.PANO_REFERENCE_LAYERS = JSON.stringify(
+      sheets.map((s) => ({ name: s.name, path: s.file, color: "#e69f00", labelProp: null })),
+    );
+    return start();
+  }
+
+  // The safety net keys on mtimeMs, and the OS may stamp two quick test
+  // writes identically (Windows timestamp ticks) — every simulated producer
+  // rewrite below sets a strictly advancing mtime so the tests never depend
+  // on that granularity.
+  let mtimeTick = 0;
+  const bumpMtime = (file: string) => {
+    const t = new Date(Date.now() + ++mtimeTick * 10);
+    fs.utimesSync(file, t, t);
+  };
+  const rewrite = (file: string, features: RefFeature[]) => {
+    write(file, features);
+    bumpMtime(file);
+  };
+
+  it("serves a rewritten file on the very next GET when the watch event was lost", () => {
+    const file = path.join(dir, "a.geojson");
+    const ctx = bootLayers([{ name: "a", file, features: [nearPt] }]);
+    rewrite(file, [nearPt, nearPtB]); // producer rewrite — the watcher never fires
+    const layer = get(ctx.handler).layers[0];
+    expect(layer?.status).toBe("ok");
+    expect(layer?.features.features).toEqual([nearPt, nearPtB]);
+    expect(ctx.ws.sent).toEqual(["reference-layers:changed"]); // idle clients refetch too
+  });
+
+  it("picks up a lost unlink via presence change, and the re-add likewise", () => {
+    const file = path.join(dir, "a.geojson");
+    const ctx = bootLayers([{ name: "a", file, features: [nearPt] }]);
+    fs.rmSync(file); // unlink event lost
+    expect(get(ctx.handler).layers[0]?.status).toBe("missing");
+    rewrite(file, [nearPtB]); // add event lost too
+    const layer = get(ctx.handler).layers[0];
+    expect(layer?.status).toBe("ok");
+    expect(layer?.features.features).toEqual([nearPtB]);
+  });
+
+  it("stats only: GETs without an mtime change never re-read layer contents", () => {
+    const file = path.join(dir, "a.geojson");
+    const readFileSync = vi.spyOn(fs, "readFileSync");
+    const ctx = bootLayers([{ name: "a", file, features: [nearPt] }]);
+    const readsOf = () => readFileSync.mock.calls.filter((call) => call[0] === file).length;
+    expect(readsOf()).toBe(1); // the boot probe
+    get(ctx.handler);
+    get(ctx.handler);
+    get(ctx.handler);
+    expect(readsOf()).toBe(1); // mtime unchanged — stat only, no content read
+    rewrite(file, [nearPtB]);
+    get(ctx.handler);
+    expect(readsOf()).toBe(2); // exactly one re-probe on the change
+  });
+
+  it("a request-path parse failure defers once, then retries on the same 300 ms timer", () => {
+    const file = path.join(dir, "a.geojson");
+    const ctx = bootLayers([{ name: "a", file, features: [nearPt, nearPtB] }]);
+    fs.writeFileSync(file, "{broken mid-write"); // lost watch event
+    bumpMtime(file);
+    let layer = get(ctx.handler).layers[0];
+    expect(layer?.status).toBe("ok"); // first failure defers, keeps serving last good
+    expect(layer?.features.features).toEqual([nearPt, nearPtB]);
+    expect(ctx.ws.sent).toEqual([]);
+    vi.advanceTimersByTime(300); // the armed retry — still bad → terminal
+    layer = get(ctx.handler).layers[0];
+    expect(layer?.status).toBe("invalid");
+    expect(layer?.features.features).toEqual([nearPt, nearPtB]); // last good kept
+    expect(ctx.ws.sent).toEqual(["reference-layers:changed"]);
+    expect(console.warn).toHaveBeenCalled();
+  });
+
+  it("a GET inside an armed retry window serves last-good and does not force terminal invalid", () => {
+    const file = path.join(dir, "a.geojson");
+    const ctx = bootLayers([{ name: "a", file, features: [nearPt, nearPtB] }]);
+    fs.writeFileSync(file, "{broken mid-write");
+    bumpMtime(file);
+    ctx.watcher.emit("change", file);
+    vi.advanceTimersByTime(300); // debounce → probe fails → deferred, retry armed
+    const layer = get(ctx.handler).layers[0]; // GET lands inside the retry window
+    expect(layer?.status).toBe("ok"); // the watch path owns the file — no early terminal
+    expect(layer?.features.features).toEqual([nearPt, nearPtB]);
+    vi.advanceTimersByTime(300); // the armed retry — still bad → terminal
+    expect(get(ctx.handler).layers[0]?.status).toBe("invalid");
     expect(ctx.ws.sent).toEqual(["reference-layers:changed"]);
   });
 });

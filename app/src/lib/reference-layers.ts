@@ -103,7 +103,11 @@ function parseLayerSpec(raw: string): Omit<RefLayerSpec, "color"> & { color: str
  */
 export type RefPosition = [number, number];
 
-/** v1 renders Point / LineString / Polygon; other geometry types are dropped at load. */
+/**
+ * v1 renders Point / LineString / Polygon. Multi* and GeometryCollection never
+ * reach this type — parseReferenceGeoJSON flattens them into one
+ * single-geometry feature per part at load.
+ */
 export type RefGeometry =
   | { type: "Point"; coordinates: RefPosition }
   | { type: "LineString"; coordinates: RefPosition[] }
@@ -121,55 +125,142 @@ export interface RefFeature {
 export interface RefLoadResult {
   status: "ok" | "invalid";
   features: RefFeature[];
+  /** Members dropped at load: structurally invalid features plus multipart
+   *  geometry parts that failed validation. The toolbar ⚠s when > 0. */
+  dropped: number;
 }
 
 /**
  * Lenient load of a layer file's parsed JSON: a FeatureCollection, a bare
  * Feature, or a bare geometry (wrapped into a Feature) are all accepted.
- * Structurally invalid features inside a collection are dropped silently;
- * everything that survives — coordinates, unknown properties, foreign
- * members — is passed through by reference, never rewritten or rounded.
- * Rings may be written closed or unclosed; closure is a filter-time concern.
+ * Multipart geometries — MultiPoint/MultiLineString/MultiPolygon/
+ * GeometryCollection, nested arbitrarily — are flattened at load into one
+ * single-geometry feature per part, each sharing the parent feature's
+ * properties object and foreign members, so the prefilter, the cull and
+ * the renderer only ever see Point/LineString/Polygon. Structurally
+ * invalid features and geometry parts that fail validation are counted in
+ * `dropped`; their valid siblings still load. Everything that survives —
+ * coordinates, unknown properties, foreign members — is passed through by
+ * reference, never rewritten or rounded. Rings may be written closed or
+ * unclosed; closure is a filter-time concern.
  */
 export function parseReferenceGeoJSON(json: unknown): RefLoadResult {
-  if (typeof json !== "object" || json === null) return { status: "invalid", features: [] };
+  if (typeof json !== "object" || json === null) return { status: "invalid", features: [], dropped: 0 };
   const obj = json as Record<string, unknown>;
   if (obj.type === "FeatureCollection" && Array.isArray(obj.features)) {
-    return { status: "ok", features: obj.features.filter(isRefFeature) };
+    const features: RefFeature[] = [];
+    let dropped = 0;
+    for (const member of obj.features) dropped += acceptFeature(member, features);
+    return { status: "ok", features, dropped };
   }
-  if (isRefFeature(json)) return { status: "ok", features: [json] };
+  if (obj.type === "Feature") {
+    const features: RefFeature[] = [];
+    const dropped = acceptFeature(obj, features);
+    return features.length > 0
+      ? { status: "ok", features, dropped }
+      : { status: "invalid", features: [], dropped: 0 };
+  }
   if (isRefGeometry(obj)) {
-    return { status: "ok", features: [{ type: "Feature", geometry: obj, properties: {} }] };
+    return { status: "ok", features: [{ type: "Feature", geometry: obj, properties: {} }], dropped: 0 };
   }
-  return { status: "invalid", features: [] };
+  // Bare multipart geometry: same flattening; nothing surviving means the
+  // whole input failed → "invalid", as before.
+  const features: RefFeature[] = [];
+  const dropped = flattenParts(obj, { type: "Feature", properties: {} }, features);
+  return features.length > 0
+    ? { status: "ok", features, dropped }
+    : { status: "invalid", features: [], dropped: 0 };
 }
 
-function isRefFeature(value: unknown): value is RefFeature {
-  if (typeof value !== "object" || value === null) return false;
-  const { type, geometry, properties } = value as Record<string, unknown>;
-  if (type !== "Feature") return false;
-  if (!isRefGeometry(geometry)) return false; // includes geometry: null / missing
-  if (typeof properties !== "object" || properties === null || Array.isArray(properties)) {
+/**
+ * Flatten one collection member into `out`, returning its dropped count: a
+ * Feature carrying a directly-valid single geometry passes through as the
+ * original object (verbatim, never copied); a multipart geometry explodes
+ * via `flattenParts`. A member that is not a feature, or whose geometry is
+ * missing/null/structurally invalid, counts as one drop.
+ */
+function acceptFeature(member: unknown, out: RefFeature[]): number {
+  if (typeof member !== "object" || member === null) return 1;
+  const feature = member as Record<string, unknown>;
+  if (feature.type !== "Feature") return 1;
+  if (
+    typeof feature.properties !== "object" ||
+    feature.properties === null ||
+    Array.isArray(feature.properties)
+  ) {
     // missing / null / nonsensical properties → the feature is kept with {}
-    (value as { properties: Record<string, unknown> }).properties = {};
+    feature.properties = {};
   }
-  return true;
+  const geometry = feature.geometry;
+  if (typeof geometry !== "object" || geometry === null) return 1; // includes missing
+  if (isRefGeometry(geometry)) {
+    out.push(feature as RefFeature);
+    return 0;
+  }
+  return flattenParts(geometry as Record<string, unknown>, feature, out);
+}
+
+/** One flattened part: the parent's members — properties object by
+ *  reference, foreign members verbatim — wearing the part's geometry. */
+function derived(parent: Record<string, unknown>, geometry: RefGeometry): RefFeature {
+  return { ...parent, geometry } as RefFeature;
+}
+
+/**
+ * Explode one multipart geometry (Multi* and GeometryCollection, nested
+ * arbitrarily) into single-geometry features derived from `parent`.
+ * Returns the dropped count: 1 for an unrecognized or structurally invalid
+ * geometry, plus one per part that fails the position/ring checks.
+ */
+function flattenParts(
+  geometry: Record<string, unknown>,
+  parent: Record<string, unknown>,
+  out: RefFeature[],
+): number {
+  const { type, coordinates, geometries } = geometry;
+  if (type === "MultiPoint" || type === "MultiLineString" || type === "MultiPolygon") {
+    if (!Array.isArray(coordinates)) return 1;
+    let dropped = 0;
+    for (const part of coordinates) {
+      const single = singleFromMultiPart(type, part);
+      if (single === null) dropped += 1; // invalid part — valid siblings still load
+      else out.push(derived(parent, single));
+    }
+    return dropped;
+  }
+  if (type === "GeometryCollection") {
+    if (!Array.isArray(geometries)) return 1;
+    let dropped = 0;
+    for (const g of geometries) {
+      if (typeof g !== "object" || g === null) dropped += 1;
+      else if (isRefGeometry(g)) out.push(derived(parent, g));
+      else dropped += flattenParts(g as Record<string, unknown>, parent, out);
+    }
+    return dropped;
+  }
+  return 1; // unsupported geometry shape / unknown type
+}
+
+/** Map one Multi* member to its single geometry — the coordinates array is
+ *  kept by reference (foreign z/M members ride along, lossless). */
+function singleFromMultiPart(
+  type: "MultiPoint" | "MultiLineString" | "MultiPolygon",
+  part: unknown,
+): RefGeometry | null {
+  if (type === "MultiPoint") return isPosition(part) ? { type: "Point", coordinates: part } : null;
+  if (type === "MultiLineString") {
+    return isLineCoordinates(part) ? { type: "LineString", coordinates: part } : null;
+  }
+  return isPolygonCoordinates(part) ? { type: "Polygon", coordinates: part } : null;
 }
 
 function isRefGeometry(value: unknown): value is RefGeometry {
   if (typeof value !== "object" || value === null) return false;
   const { type, coordinates } = value as Record<string, unknown>;
   if (type === "Point") return isPosition(coordinates);
-  if (type === "LineString") {
-    return Array.isArray(coordinates) && coordinates.length >= 2 && coordinates.every(isPosition);
-  }
-  if (type === "Polygon") {
-    return (
-      Array.isArray(coordinates) &&
-      coordinates.every((ring) => Array.isArray(ring) && ring.every(isPosition))
-    );
-  }
-  return false; // Multi* / GeometryCollection / anything else
+  if (type === "LineString") return isLineCoordinates(coordinates);
+  if (type === "Polygon") return isPolygonCoordinates(coordinates);
+  return false; // Multi*/GeometryCollection — flattened upstream, never valid here
 }
 
 function isPosition(value: unknown): value is RefPosition {
@@ -180,6 +271,18 @@ function isPosition(value: unknown): value is RefPosition {
     typeof value[1] === "number" &&
     Number.isFinite(value[0]) &&
     Number.isFinite(value[1])
+  );
+}
+
+/** A LineString's coordinates: at least two positions. */
+function isLineCoordinates(value: unknown): value is RefPosition[] {
+  return Array.isArray(value) && value.length >= 2 && value.every(isPosition);
+}
+
+/** A Polygon's coordinates: rings of positions (closure not required). */
+function isPolygonCoordinates(value: unknown): value is RefPosition[][] {
+  return (
+    Array.isArray(value) && value.every((ring) => Array.isArray(ring) && ring.every(isPosition))
   );
 }
 
@@ -304,6 +407,8 @@ export interface RefLayerPayload {
   color: string;
   labelProp: string | null;
   status: "ok" | "invalid" | "missing";
+  /** Features/parts dropped at load (invalid geometry) — toolbar ⚠s when > 0. */
+  dropped: number;
   features: { type: "FeatureCollection"; features: RefFeature[] };
 }
 
@@ -311,11 +416,12 @@ export interface RefLayerPayload {
 
 /**
  * One fs attempt at a layer file, produced by the vite wiring: parsed
- * features, an absent file, or an unreadable/corrupt one. `message` rides
- * along for the wiring's console.warn — the machine never looks at it.
+ * features plus the load's dropped count, an absent file, or an
+ * unreadable/corrupt one. `message` rides along for the wiring's
+ * console.warn — the machine never looks at it.
  */
 export type RefFileProbe =
-  | { read: "ok"; features: RefFeature[] }
+  | { read: "ok"; features: RefFeature[]; dropped: number }
   | { read: "missing" }
   | { read: "error"; message: string };
 
@@ -350,6 +456,7 @@ export function createLayerState(spec: RefLayerSpec): RefLayerState {
       color: spec.color,
       labelProp: spec.labelProp ?? null,
       status: "missing",
+      dropped: 0,
       features: { type: "FeatureCollection", features: [] },
     },
     retryPending: false,
@@ -359,16 +466,18 @@ export function createLayerState(spec: RefLayerSpec): RefLayerState {
 /**
  * Fold one file probe into the watch state (spec §Watch semantics):
  *
- *  - ok      → full replace, status "ok", whole-included by the circle union.
- *  - missing → empty features, status "missing".
+ *  - ok      → full replace, status "ok" (dropped = the load's count),
+ *    whole-included by the circle union.
+ *  - missing → empty features, status "missing", dropped 0.
  *  - error   → first failure of an episode defers (payload untouched — the
  *    last good keeps rendering and nothing is emitted) and asks for its one
  *    300 ms retry; the retry failing too, or any error while a retry is
  *    pending, is terminal: status "invalid" with the last-good features kept.
  *
- * `changed` compares status + filtered features, so a rewrite that alters
- * neither emits nothing (key-order-sensitive — a reorder-only rewrite may
- * push once; the refetch is idempotent, so benign).
+ * `changed` compares status + dropped + filtered features, so a rewrite
+ * that alters none of them emits nothing (key-order-sensitive — a
+ * reorder-only rewrite may push once; the refetch is idempotent, so
+ * benign).
  */
 export function acceptLayerProbe(
   prev: RefLayerState,
@@ -389,10 +498,12 @@ export function acceptLayerProbe(
   const payload = {
     ...prev.payload,
     status: (probe.read === "ok" ? "ok" : "missing") as RefLayerPayload["status"],
+    dropped: probe.read === "ok" ? probe.dropped : 0,
     features: { type: "FeatureCollection" as const, features },
   };
   const changed =
     prev.payload.status !== payload.status ||
+    prev.payload.dropped !== payload.dropped ||
     JSON.stringify(prev.payload.features) !== JSON.stringify(payload.features);
   return { state: { payload, retryPending: false }, changed, invalid: false };
 }

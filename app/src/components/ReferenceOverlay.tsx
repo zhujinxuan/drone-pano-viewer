@@ -4,7 +4,7 @@
  * foundations, avoidance areas…) drawn into the Photo Sphere Viewer scene.
  *
  * The App fetches `GET /api/reference-layers` (frozen contract:
- * `{ layers: [{ name, color, labelProp, status, features }] }`) on mount and
+ * `{ layers: [{ name, color, labelProp, status, dropped, features }] }`) on mount and
  * refetches on the `reference-layers:changed` HMR push; this component only
  * renders what it is handed.
  *

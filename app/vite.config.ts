@@ -212,10 +212,15 @@ const RETRY_AFTER_MS = 300;
  * Layer specs arrive via `PANO_REFERENCE_LAYERS` (JSON array set by cli.ts:
  * [{ name, path, color, labelProp }]) — same flow as the other PANO_* vars.
  * The env and every layer file are read once at configureServer boot; from
- * then on the watcher keeps that cached state current.
+ * then on the watcher — backed by a request-time mtime check — keeps that
+ * cached state current.
  *
  *  - GET /api/reference-layers → { layers: [{ name, color, labelProp,
- *    status, features }] } served from the cache. Each layer's features are
+ *    status, features }] } served from the cache — but first each watched
+ *    file is stat'd, and any mtime/presence change since its last probe
+ *    reloads through the shared watch path (spec §Watch semantics): a lost
+ *    watch event can't outlive one request. Files with a debounce/retry
+ *    timer pending are left to the watcher. Each layer's features are
  *    whole-included by the union of 1 km circles around every positioned
  *    pano of the served dir — the full scan, not the playlist (a playlist is
  *    a review restriction, not a data extent). No clipping: features pass
@@ -246,10 +251,19 @@ export function panoReferenceLayers(): Plugin {
       // layers read which file — the watcher folds its probes into these.
       const layers: RefLayerState[] = [];
       const byPath = new Map<string, number[]>();
+      // Last-probed mtime per file, 0 = absent (spec §Watch semantics): the
+      // request-time safety net compares a fresh stat against this stamp, so
+      // a lost watch event cannot outlive one GET.
+      const stamps = new Map<string, number>();
 
-      // Probe one layer file and fold the result into the live state.
+      // Probe one layer file and fold the result into the live state. The
+      // stamp is taken before the read: if the file changes in between, the
+      // stamp is older than the cached content and the next check re-probes
+      // once — never a stale cache hiding behind a fresh stamp.
       const accept = (index: number, file: string, union: readonly LonLat[]): RefLayerTransition => {
+        const mtimeMs = statMtimeMs(file);
         const probe = probeFile(file);
+        stamps.set(file, mtimeMs);
         const transition = acceptLayerProbe(layers[index]!, probe, union);
         layers[index] = transition.state;
         if (transition.invalid && probe.read === "error") {
@@ -290,40 +304,58 @@ export function panoReferenceLayers(): Plugin {
         }
       }
 
+      // The one shared reload path (spec §Watch semantics) for debounced
+      // watch events, their retries, and the endpoint's request-time check:
+      // probe every layer reading the file, fold through acceptLayerProbe,
+      // arm the single 300 ms retry on a first failure, push one ws event
+      // per accepted change. The two timer maps also tell the endpoint's
+      // request-time check that the watch path already owns a file.
+      const retries = new Map<string, NodeJS.Timeout>();
+      const debounces = new Map<string, NodeJS.Timeout>();
+      const reload = (file: string) => {
+        const indices = byPath.get(file);
+        if (!indices) return;
+        const union = circles();
+        let changed = false;
+        for (const index of indices) {
+          const transition = accept(index, file, union);
+          if (transition.state.retryPending && !retries.has(file)) {
+            retries.set(
+              file,
+              setTimeout(() => {
+                retries.delete(file);
+                reload(file);
+              }, RETRY_AFTER_MS),
+            );
+          }
+          if (transition.changed) changed = true;
+        }
+        if (changed) server.ws.send("reference-layers:changed");
+      };
+
       server.middlewares.use("/api/reference-layers", (_req, res) => {
+        // Request-time mtime safety net: stat every watched file and reload
+        // any whose mtime/presence moved since its last probe — the bound on
+        // a lost watch event (one request). One stat per file per request.
+        // A pending debounce/retry timer means the watch path already owns
+        // the file; the check yields, so request traffic can neither jump
+        // the 300 ms debounce nor cut a retry window short into an early
+        // terminal "invalid".
+        for (const file of byPath.keys()) {
+          if (debounces.has(file) || retries.has(file)) continue;
+          if (statMtimeMs(file) !== (stamps.get(file) ?? 0)) reload(file);
+        }
         res.setHeader("Content-Type", "application/json; charset=utf-8");
         res.end(JSON.stringify({ layers: layers.map((layer) => layer.payload) }));
       });
 
-      // Watch wiring: one debounce timer per file; a debounced event reloads
-      // every layer reading that file and pushes one ws event per accepted
-      // change. The machine defers a first parse failure by flipping
-      // retryPending, which schedules its single 300 ms retry here.
+      // Watch wiring: one debounce timer per file (in `debounces` above); a
+      // debounced event goes through the shared reload. The machine defers a
+      // first parse failure by flipping retryPending, which schedules its
+      // single 300 ms retry there.
       if (byPath.size > 0) {
         for (const abs of byPath.keys()) server.watcher.add(abs);
 
-        const debounces = new Map<string, NodeJS.Timeout>();
-        const retries = new Map<string, NodeJS.Timeout>();
-        const reload = (file: string) => {
-          const indices = byPath.get(file);
-          if (!indices) return;
-          const union = circles();
-          let changed = false;
-          for (const index of indices) {
-            const transition = accept(index, file, union);
-            if (transition.state.retryPending && !retries.has(file)) {
-              retries.set(
-                file,
-                setTimeout(() => {
-                  retries.delete(file);
-                  reload(file);
-                }, RETRY_AFTER_MS),
-              );
-            }
-            if (transition.changed) changed = true;
-          }
-          if (changed) server.ws.send("reference-layers:changed");
-        };
         const onWatchEvent = (file: string) => {
           if (!byPath.has(file)) return; // Vite's watcher also emits project files
           clearTimeout(debounces.get(file));
@@ -348,11 +380,20 @@ function probeFile(file: string): RefFileProbe {
   try {
     const loaded = parseReferenceGeoJSON(JSON.parse(fs.readFileSync(file, "utf8")));
     return loaded.status === "ok"
-      ? { read: "ok", features: loaded.features }
+      ? { read: "ok", features: loaded.features, dropped: loaded.dropped }
       : { read: "error", message: "not recognizable GeoJSON" };
   } catch (e) {
     const err = e as NodeJS.ErrnoException;
     return err.code === "ENOENT" ? { read: "missing" } : { read: "error", message: err.message };
+  }
+}
+
+/** Layer-file mtime in ms, 0 when absent — a presence change is a change. */
+function statMtimeMs(file: string): number {
+  try {
+    return fs.statSync(file).mtimeMs;
+  } catch {
+    return 0;
   }
 }
 

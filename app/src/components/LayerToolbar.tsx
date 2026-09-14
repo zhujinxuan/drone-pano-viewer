@@ -3,7 +3,8 @@
  * foldable, draggable floating panel listing every reference layer — color
  * swatch, name, visibility checkbox (drives ReferenceOverlay's `visible`
  * map), feature count, and a warning glyph with explanatory tooltip when
- * `status != "ok"`. Panel position and fold state persist in localStorage;
+ * `status != "ok"` or the load dropped features (`dropped > 0`). Panel
+ * position and fold state persist in localStorage;
  * dragging is by header via pointer events (pointer capture, so a drag that
  * leaves the header never drops the panel).
  *
@@ -98,6 +99,11 @@ function statusTip(status: RefLayerPayload["status"]): string {
   return "";
 }
 
+/** Warning-glyph tooltip when a still-ok load dropped features (ticket 07). */
+function droppedTip(dropped: number): string {
+  return `${dropped} feature(s) dropped: unsupported or invalid geometry`;
+}
+
 export default function LayerToolbar({ layers, visible, onToggleVisible }: LayerToolbarProps) {
   const [panel, setPanel] = useState<PanelState>(loadPanelState);
   // Latest geometry outside React's batching: the drag-end persist must see
@@ -186,8 +192,11 @@ export default function LayerToolbar({ layers, visible, onToggleVisible }: Layer
               />
               <span className="lt-swatch" style={{ background: l.color }} />
               <span className="lt-name">{l.name}</span>
-              {l.status !== "ok" && (
-                <span className="lt-warn" title={statusTip(l.status)}>
+              {(l.status !== "ok" || l.dropped > 0) && (
+                <span
+                  className="lt-warn"
+                  title={l.status !== "ok" ? statusTip(l.status) : droppedTip(l.dropped)}
+                >
                   ⚠
                 </span>
               )}

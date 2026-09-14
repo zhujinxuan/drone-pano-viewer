@@ -17,9 +17,9 @@ Show **externally-owned** geo data — turbine foundations, sensitive/avoidance 
 
 ## Server endpoint & prefilter (vite.config.ts middleware)
 
-- `GET /api/reference-layers` → `{ layers: [{ name, color, labelProp, status, features: FeatureCollection }] }`, `status: "ok" | "invalid" | "missing"`.
+- `GET /api/reference-layers` → `{ layers: [{ name, color, labelProp, status, dropped, features: FeatureCollection }] }`, `status: "ok" | "invalid" | "missing"`; `dropped` counts the features/parts the load rejected.
 - **Prefilter at load**: union of 1 km-radius circles around every pano in the served photos-dir (geohash8-decoded positions; `nogps-*` skipped — playlist is a review restriction, not a data extent). A feature is included **whole** if it intersects the union: Point = inside any circle; LineString/Polygon = any vertex inside any circle **or** any segment's min distance to a circle center ≤ radius (vertices alone miss edge-clips). No clipping — geometry is never altered.
-- Lenient load, lossless pass-through: unknown feature properties preserved verbatim; bare Feature/geometry accepted by wrapping.
+- Lenient load, lossless pass-through: unknown feature properties preserved verbatim; bare Feature/geometry accepted by wrapping. Multipart geometries (MultiPoint/MultiLineString/MultiPolygon/GeometryCollection, nested arbitrarily) are flattened at load into one single-geometry Feature per part, each sharing the parent feature's properties — a dissolved-MultiPolygon layer loads instead of silently serving 0 features. Structurally invalid features and parts that fail the position/ring checks are counted in `dropped` while their valid siblings still load; `dropped > 0` shows the toolbar ⚠ on a still-`ok` layer.
 
 ## Watch semantics (the live-update mechanism — no CRUD API)
 
@@ -28,6 +28,7 @@ Show **externally-owned** geo data — turbine foundations, sensitive/avoidance 
 - Parse failure: one retry after 300 ms; still bad → keep last-good features, `status: "invalid"`.
 - File deleted: empty FeatureCollection, `status: "missing"`.
 - Any successful parse: full replace, `status: "ok"`.
+- Safety net for lost watch events: `GET /api/reference-layers` stats every watched file before answering and re-probes any whose mtime/presence changed since its last probe — through the same reload path, so the retry semantics above apply unchanged. Files with a debounce or retry timer pending are skipped: the watch path owns in-flight transitions. A dropped watch event can't outlive one request; cost is one `stat` per file per request.
 - Rationale: every producer already writes files; an HTTP CRUD API would be a second write path with nothing to reconcile against. A producer wanting push semantics just writes the file.
 
 ## Client behavior

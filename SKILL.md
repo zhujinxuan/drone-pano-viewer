@@ -7,6 +7,17 @@ description: View stitched drone panorama photos (equirectangular 踏勘全景) 
 
 Local web viewer for drone panos. This skill folder is the app repo; the app lives in `app/` (Vite + React) and shows a photo-sphere viewer with yaw/pitch/FOV overlay, title banner, and a DJI EXIF/XMP metadata panel.
 
+## External agents: never edit, file a ticket
+
+If you are an agent working in **any other repo/workdir** (e.g. a wind-project repo invoking this viewer): direct editing of anything in this skill repo (`app/`, `SKILL.md`, docs, configs) is **strictly prohibited**. The skill maintainer owns all code changes.
+
+Found a bug, a missing feature, or a broken contract? File a ticket in the repo's local markdown issue tracker instead:
+
+- Create `.scratch/<feature-slug>/issues/<NN>-<slug>.md` (next free `NN` in that feature's `issues/` dir; create the dirs if needed).
+- Body: what you ran (exact `npm run pano -- …` command + photos dir), what you expected, what happened, and the impact on your workflow.
+- Set `Status: needs-triage` near the top (see `docs/agents/triage-labels.md`).
+- Conventions: `docs/agents/issue-tracker.md`. Then report the ticket path back to your user and continue with whatever the current viewer can do — do not work around it by patching the app.
+
 ## Viewer overlays & measurement
 
 - **HUD** (top right): `yaw · pitch · fov · dist`, live at 10 Hz. `dist` is the flat-ground distance to the ground point at the **center reticle** (always-on crosshair): horizontal from the pano's XMP `RelativeAltitude` and the view pitch, with slant range in parentheses — meters rounded to 10 m, `> 5 km` past the cap, `—` when looking at/above the horizon or when altitude is missing. Ground is assumed flat at takeoff elevation; terrain relief degrades it, especially at shallow pitch.
@@ -97,15 +108,15 @@ npm run pano -- view <dir> --layer turbines=turbines.geojson
 - Point labels: `label=<prop>` names the property; default precedence `labelProp` > `label` > `name` > `id` > `turbine` — first non-blank string wins (finite numbers stringify), no match → an unlabeled dot, never an error.
 - GeoJSON only, no GPKG — producers export `.geojson` siblings instead.
 
-**Server contract** — `GET /api/reference-layers` → `{ layers: [{ name, color, labelProp, status, features }] }` with `status: "ok" | "invalid" | "missing"`; never a 500 — a broken layer degrades with a warning. At load each feature is included **whole** iff it intersects the union of 1 km-radius circles around every positioned pano of the served dir (full scan, not the playlist — a playlist is a review restriction, not a data extent); no clipping — geometry and foreign properties pass through verbatim. The client fetches once on mount and refetches on every `reference-layers:changed` ws push.
+**Server contract** — `GET /api/reference-layers` → `{ layers: [{ name, color, labelProp, status, dropped, features }] }` with `status: "ok" | "invalid" | "missing"`; never a 500 — a broken layer degrades with a warning. Multipart geometries (Multi*/GeometryCollection, nested arbitrarily) are flattened at load into one single-geometry feature per part, each sharing the parent feature's properties; `dropped` counts the features/parts the load rejected (invalid geometry — ⚠ in the toolbar when > 0). At load each feature is included **whole** iff it intersects the union of 1 km-radius circles around every positioned pano of the served dir (full scan, not the playlist — a playlist is a review restriction, not a data extent); no clipping — geometry and foreign properties pass through verbatim. The client fetches once on mount and refetches on every `reference-layers:changed` ws push.
 
-**Live update (file watch)** — the server watches each layer file with Vite's own watcher (no new dependency): 300 ms debounce per file → re-read → re-filter → ws push **when the served payload actually changed**. A parse failure retries once after 300 ms; still bad → keep last-good features, `status: "invalid"`. Deleted file → empty features, `status: "missing"`. Any successful parse fully replaces, `status: "ok"`. A producer wanting push semantics just writes the file.
+**Live update (file watch)** — the server watches each layer file with Vite's own watcher (no new dependency): 300 ms debounce per file → re-read → re-filter → ws push **when the served payload actually changed**. A parse failure retries once after 300 ms; still bad → keep last-good features, `status: "invalid"`. Deleted file → empty features, `status: "missing"`. Any successful parse fully replaces, `status: "ok"`. A producer wanting push semantics just writes the file. Safety net for lost watch events: each GET stats the watched files first and re-probes any whose mtime/presence changed since its last probe, unless that file already has a debounce/retry pending (same reload path, retry semantics included).
 
 **UI contract**:
 
 - **Render** (only when the pano has a camera position + altitude): points → colored dot + DOM label, lines → polylines, polygons → boundary + translucent fill (~15% opacity); same flat-ground projection and per-frame label discipline as annotations.
 - **Per-pano cull**: a feature with every vertex more than 1100 m from the current camera is not drawn — the prefilter bounds the data extent, the cull is per-photo render hygiene.
-- **Layer toolbar** (bottom right): foldable, draggable by its header; position + fold persisted in `localStorage` (`pano.refLayerToolbar`). One row per layer: color swatch, name, visibility checkbox (all visible by default), feature count, and a ⚠ glyph when `status != "ok"` (tooltip: "invalid geojson, showing last good" / "file not found"). Zero layers → no toolbar at all.
+- **Layer toolbar** (bottom right): foldable, draggable by its header; position + fold persisted in `localStorage` (`pano.refLayerToolbar`). One row per layer: color swatch, name, visibility checkbox (all visible by default), feature count, and a ⚠ glyph when `status != "ok"` (tooltip: "invalid geojson, showing last good" / "file not found") or when `dropped > 0` (tooltip: "N feature(s) dropped: unsupported or invalid geometry"). Zero layers → no toolbar at all.
 - **Click-inspect**: while no capture mode is active, a click on a feature opens a small read-only readout — layer name (with swatch) + every property in file order; Esc, ✕, or a click elsewhere closes. No editing affordances.
 
 See `docs/adr/0003-reference-layers.md`.
