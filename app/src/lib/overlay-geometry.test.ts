@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { vincentyDirect } from "./geodesy.ts";
-import { verticesCentroid, vertexView } from "./overlay-geometry.ts";
+import { makeProjector, simplifyViewRays, verticesCentroid, vertexView } from "./overlay-geometry.ts";
 
 // The camera fix mirrors the spec's example capture (44.9 N, 125.1 E,
 // 112.5 m AGL). Ground distances span the feature's working range up to the
@@ -74,5 +74,81 @@ describe("verticesCentroid", () => {
 
   it("single vertex is its own centroid", () => {
     expect(verticesCentroid([[125.05, 44.95]])).toEqual([125.05, 44.95]);
+  });
+});
+
+// Ticket 11: makeProjector hoists cam-only terms — identical math to
+// vertexView; simplifyViewRays is the sub-pixel Douglas-Peucker render cut.
+
+describe("makeProjector", () => {
+  it("matches vertexView across the working range", () => {
+    const project = makeProjector(CAM);
+    for (const dist of [1, 10, 250, 1000, 5000]) {
+      for (const bearing of [0, 45, 90, 135, 180, 225, 270, 315]) {
+        const t = vincentyDirect(CAM.lat, CAM.lon, bearing, dist);
+        const v: [number, number] = [t.lon, t.lat];
+        const a = project(v);
+        const b = vertexView(CAM, v);
+        expect(a.yawRad).toBeCloseTo(b.yawRad, 12);
+        expect(a.pitchRad).toBeCloseTo(b.pitchRad, 12);
+      }
+    }
+  });
+});
+
+describe("simplifyViewRays", () => {
+  const ray = (yaw: number, pitch = 0): { yawRad: number; pitchRad: number } => ({
+    yawRad: yaw,
+    pitchRad: pitch,
+  });
+
+  it("returns short inputs whole", () => {
+    expect(simplifyViewRays([ray(0), ray(1)], false)).toEqual([0, 1]);
+    expect(simplifyViewRays([ray(0), ray(0.5), ray(1)], true)).toEqual([0, 1, 2]);
+    expect(simplifyViewRays([], false)).toEqual([]);
+  });
+
+  it("collapses a dense collinear run to its endpoints", () => {
+    const rays = Array.from({ length: 10000 }, (_, i) => ray(i * 1e-6, i * 2e-6));
+    expect(simplifyViewRays(rays, false)).toEqual([0, 9999]);
+  });
+
+  it("keeps a vertex whose deviation exceeds ε and drops one below it", () => {
+    const eps = 1e-3;
+    // mid at 2ε off the chord → kept; another at ε/10 → dropped
+    const rays = [ray(0), ray(0.5, 2 * eps), ray(1), ray(1.5, eps / 10), ray(2)];
+    expect(simplifyViewRays(rays, false, eps)).toEqual([0, 1, 2, 4]);
+  });
+
+  it("closed rings keep at least 3 vertices even when fully flat", () => {
+    const rays = Array.from({ length: 100 }, (_, i) => ray(i * 1e-6));
+    const kept = simplifyViewRays(rays, true);
+    expect(kept.length).toBe(3);
+    expect(kept[0]).toBe(0);
+    expect(kept[kept.length - 1]).toBe(99);
+  });
+
+  it("bounded deviation: every dropped vertex is within ε of the simplified polyline", () => {
+    // Random-ish polyline (deterministic LCG), verify the DP contract directly.
+    let seed = 7;
+    const rand = () => (seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31;
+    const eps = 5e-4;
+    const rays = Array.from({ length: 2000 }, (_, i) => ray(i * 1e-4, (rand() - 0.5) * 4e-4));
+    const kept = simplifyViewRays(rays, false, eps);
+    for (let s = 0; s < kept.length - 1; s++) {
+      const a = rays[kept[s]!]!;
+      const b = rays[kept[s + 1]!]!;
+      for (let i = kept[s]! + 1; i < kept[s + 1]!; i++) {
+        const p = rays[i]!;
+        const abx = b.yawRad - a.yawRad;
+        const aby = b.pitchRad - a.pitchRad;
+        const t = Math.max(
+          0,
+          Math.min(1, ((p.yawRad - a.yawRad) * abx + (p.pitchRad - a.pitchRad) * aby) / (abx * abx + aby * aby)),
+        );
+        const d = Math.hypot(p.yawRad - a.yawRad - t * abx, p.pitchRad - a.pitchRad - t * aby);
+        expect(d).toBeLessThanOrEqual(eps * 1.0001);
+      }
+    }
   });
 });

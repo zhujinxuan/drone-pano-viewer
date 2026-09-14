@@ -48,7 +48,7 @@ import {
   Vector2,
   Vector3,
 } from "three";
-import { vertexView, type OverlayCam } from "../lib/overlay-geometry";
+import { makeProjector, SIMPLIFY_EPS_RAD, simplifyViewRays, vertexView, type OverlayCam, type ViewRay } from "../lib/overlay-geometry";
 import {
   nearestInspectFeature,
   type InspectCandidate,
@@ -241,9 +241,10 @@ function rayPositions(
   vertices: readonly RefPosition[],
   radius: number,
 ): Vector3[] {
+  const project = makeProjector(cam);
   const out: Vector3[] = [];
   for (const v of vertices) {
-    const { yawRad, pitchRad } = vertexView(cam, v);
+    const { yawRad, pitchRad } = project(v);
     out.push(
       viewer.dataHelper.sphericalCoordsToVector3(
         { yaw: yawRad, pitch: pitchRad },
@@ -253,6 +254,61 @@ function rayPositions(
     );
   }
   return out;
+}
+
+/**
+ * Decimation floor: rings/lines smaller than this skip Douglas-Peucker
+ * entirely (simplification cost would exceed the saving) and keep the
+ * per-feature fill cache.
+ */
+const SIMPLIFY_MIN_VERTICES = 1000;
+
+/**
+ * Fill decimation ε, 5× the stroke ε (≈1.5 px at 1600 px/60° FOV, 0.5 px
+ * zoomed to 30°). The boundary strokes carry the visible edge at full
+ * fidelity; the 15%-opacity fill may wobble under them — but earcut's
+ * hole-bridging cost is superlinear, and for the 900-hole monster polygons
+ * this is the difference between a 160 ms and a 30 ms triangulation.
+ */
+const FILL_EPS_RAD = 5 * SIMPLIFY_EPS_RAD;
+
+/**
+ * Projected positions of a line/ring, angularly decimated when `decimate`
+ * (ticket 11): huge producer polygons land dozens of vertices per screen
+ * pixel near the horizon; Douglas-Peucker at a sub-pixel ε collapses those
+ * runs before any Vector3 allocation or GPU upload. The decimate decision is
+ * made per FEATURE by the caller (a 900-ring monster must decimate its small
+ * rings too — 900 undecimated "small" rings still total ~54 k fill vertices
+ * and turn earcut's hole-bridging quadratic). `decimated` reports whether
+ * any vertices were actually dropped.
+ */
+function projectedPath(
+  viewer: Viewer,
+  cam: OverlayCam,
+  vertices: readonly RefPosition[],
+  radius: number,
+  closed: boolean,
+  decimate: boolean,
+  epsRad: number = SIMPLIFY_EPS_RAD,
+): { points: Vector3[]; decimated: boolean } {
+  if (!decimate) {
+    return { points: rayPositions(viewer, cam, vertices, radius), decimated: false };
+  }
+  const project = makeProjector(cam);
+  const rays: ViewRay[] = vertices.map(project);
+  const kept = simplifyViewRays(rays, closed, epsRad);
+  const out: Vector3[] = [];
+  for (const i of kept) {
+    const r = rays[i]!;
+    out.push(
+      viewer.dataHelper.sphericalCoordsToVector3(
+        { yaw: r.yawRad, pitch: r.pitchRad },
+        new Vector3(),
+        radius,
+      ),
+    );
+  }
+  return { points: out, decimated: kept.length < vertices.length };
 }
 
 /** Polyline through `points`; `closed` appends the first point again (ring). */
@@ -305,22 +361,29 @@ function triangulateRings(rings: Vector3[][]): readonly number[][] | null {
 /**
  * Polygon fill mesh on the sphere, like the annotation fill. Faces come from
  * the per-feature cache (computed on the first build that draws this
- * feature); only vertex positions are recomputed per rebuild. Chord sag is
- * ≪ a pixel for ≤ 5 km edges on the radius-10 sphere (see
+ * feature); only vertex positions are recomputed per rebuild. `feature` is
+ * null for angularly decimated rings (ticket 11) — their indices address one
+ * cam's decimated ring, so they triangulate fresh and never touch the cache.
+ * Chord sag is ≪ a pixel for ≤ 5 km edges on the radius-10 sphere (see
  * AnnotationOverlay's geometry notes).
  */
 function makeFill(
   build: OverlayBuild,
-  feature: RefFeature,
+  feature: RefFeature | null,
   rings: Vector3[][],
   material: MeshBasicMaterial,
 ): void {
-  let faces = fillFaces.get(feature);
-  if (faces === undefined) {
+  let faces: readonly number[][] | null | undefined;
+  if (feature !== null) {
+    faces = fillFaces.get(feature);
+    if (faces === undefined) {
+      faces = triangulateRings(rings);
+      fillFaces.set(feature, faces);
+    }
+  } else {
     faces = triangulateRings(rings);
-    fillFaces.set(feature, faces);
   }
-  if (faces === null) return;
+  if (faces == null) return;
 
   // Same flattening triangulateRings indexed into: contour + holes with ≥ 3
   // points, in order. Anything else would shift the cached indices.
@@ -396,19 +459,41 @@ function buildReferenceOverlay(
           break;
         }
         case "LineString": {
-          makeLine(build, rayPositions(viewer, cam, f.geometry.coordinates, RADIUS), strokeMat, false);
+          makeLine(
+            build,
+            projectedPath(
+              viewer,
+              cam,
+              f.geometry.coordinates,
+              RADIUS,
+              false,
+              f.geometry.coordinates.length > SIMPLIFY_MIN_VERTICES,
+            ).points,
+            strokeMat,
+            false,
+          );
           break;
         }
         case "Polygon": {
           const rings = f.geometry.coordinates.map(openRing);
+          // Decimate per FEATURE: a huge polygon decimates every ring, small
+          // ones included (undecimated "small" rings of a 900-ring monster
+          // still flood the fill's hole-bridging).
+          const decimate =
+            rings.reduce((n, r) => n + r.length, 0) > SIMPLIFY_MIN_VERTICES;
           // One projection per vertex, shared by the boundary strokes and the
-          // fill — dense producer polygons (60 k+ vertices) make the double
-          // projection the residual per-switch cost.
-          const ringPts = rings.map((r) => rayPositions(viewer, cam, r, RADIUS));
-          for (const pts of ringPts) {
-            makeLine(build, pts, strokeMat, true);
+          // fill; huge rings are angularly decimated (sub-pixel) first.
+          const paths = rings.map((r) => projectedPath(viewer, cam, r, RADIUS, true, decimate));
+          for (const { points } of paths) {
+            makeLine(build, points, strokeMat, true);
           }
-          makeFill(build, f, ringPts, fillMat);
+          // Decimated polygons: fresh per-cam triangulation of a coarser fill
+          // ring (the stroke already draws the true edge); undecimated ones
+          // keep the per-feature faces cache.
+          const fillRings = decimate
+            ? rings.map((r) => projectedPath(viewer, cam, r, RADIUS, true, true, FILL_EPS_RAD).points)
+            : paths.map((p) => p.points);
+          makeFill(build, decimate ? null : f, fillRings, fillMat);
           break;
         }
       }

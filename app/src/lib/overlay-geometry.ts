@@ -57,19 +57,107 @@ export type Vertex = readonly [number, number];
  * angle.
  */
 export function vertexView(cam: OverlayCam, vertex: Vertex): ViewRay {
+  return makeProjector(cam)(vertex);
+}
+
+/**
+ * `vertexView` with every cam-only term (M/N radii, cos φ, height) hoisted
+ * out of the per-vertex path — overlay rebuilds project tens of thousands of
+ * vertices against one camera (ticket 11). Identical math to `vertexView`.
+ */
+export function makeProjector(cam: OverlayCam): (vertex: Vertex) => ViewRay {
   const phi = cam.lat * RAD;
   const sinPhi = Math.sin(phi);
   const denom = 1 - E2 * sinPhi * sinPhi;
   const mPhi = (A * (1 - E2)) / Math.pow(denom, 1.5);
-  const nPhi = A / Math.sqrt(denom);
-
-  const dN = (vertex[1] - cam.lat) * RAD * mPhi;
-  const dE = (vertex[0] - cam.lon) * RAD * nPhi * Math.cos(phi);
-
-  return {
-    yawRad: Math.atan2(dE, dN),
-    pitchRad: -Math.atan2(cam.relAltM, Math.hypot(dN, dE)),
+  const nPhiCos = (A / Math.sqrt(denom)) * Math.cos(phi);
+  const h = cam.relAltM;
+  return (vertex) => {
+    const dN = (vertex[1] - cam.lat) * RAD * mPhi;
+    const dE = (vertex[0] - cam.lon) * RAD * nPhiCos;
+    return { yawRad: Math.atan2(dE, dN), pitchRad: -Math.atan2(h, Math.hypot(dN, dE)) };
   };
+}
+
+/* ---------- Render-time angular decimation (ticket 11) ----------
+ *
+ * Dense producer polygons (a dissolved avoidance union can be a single
+ * 60 k+-vertex ring) re-project and re-buffer on every pano switch. Most of
+ * those vertices are far away: they land in a thin horizon band, dozens per
+ * screen pixel. Douglas-Peucker in the projected (yaw, pitch) plane with a
+ * sub-pixel ε collapses exactly those runs while keeping near-field detail —
+ * the deviation of every dropped vertex from the simplified polyline is
+ * bounded by ε, i.e. invisible at any sane zoom. Data is never altered; this
+ * is render hygiene between the cull and three.js.
+ *
+ * Yaw wraparound: a ring straddling ±π shows DP a huge yaw jump, which just
+ * keeps the jump's endpoints — conservative (extra vertices), never wrong.
+ */
+
+/** Default ε: ≈0.3 px at 1600 px / 60° FOV; still sub-pixel zoomed 2×. */
+export const SIMPLIFY_EPS_RAD = 2e-4;
+
+/** Perpendicular distance of point p to segment ab in the (yaw, pitch) plane. */
+function raySegmentDistance(p: ViewRay, a: ViewRay, b: ViewRay): number {
+  const abx = b.yawRad - a.yawRad;
+  const aby = b.pitchRad - a.pitchRad;
+  const apx = p.yawRad - a.yawRad;
+  const apy = p.pitchRad - a.pitchRad;
+  const len2 = abx * abx + aby * aby;
+  if (len2 === 0) return Math.hypot(apx, apy);
+  let t = (apx * abx + apy * aby) / len2;
+  if (t < 0) t = 0;
+  else if (t > 1) t = 1;
+  return Math.hypot(apx - t * abx, apy - t * aby);
+}
+
+/**
+ * Douglas-Peucker over the projected rays; returns the kept indices,
+ * ascending, endpoints always kept. `closed` additionally guarantees ≥ 3
+ * kept points (a ring decimated below 3 vertices would fill nothing — the
+ * whole ring is sub-pixel then, but a degenerate fill must never sneak
+ * through). Iterative stack — producer rings can be 100 k deep.
+ */
+export function simplifyViewRays(
+  rays: readonly ViewRay[],
+  closed: boolean,
+  epsRad: number = SIMPLIFY_EPS_RAD,
+): number[] {
+  const n = rays.length;
+  if (n === 0) return [];
+  const minKeep = closed ? 3 : 2;
+  if (n <= minKeep) return rays.map((_, i) => i);
+
+  const keep = new Uint8Array(n);
+  keep[0] = 1;
+  keep[n - 1] = 1;
+  const stack: Array<[number, number]> = [[0, n - 1]];
+  while (stack.length > 0) {
+    const [s, e] = stack.pop()!;
+    let maxD = -1;
+    let maxI = -1;
+    const a = rays[s]!;
+    const b = rays[e]!;
+    for (let i = s + 1; i < e; i++) {
+      const d = raySegmentDistance(rays[i]!, a, b);
+      if (d > maxD) {
+        maxD = d;
+        maxI = i;
+      }
+    }
+    if (maxD > epsRad) {
+      keep[maxI] = 1;
+      stack.push([s, maxI], [maxI, e]);
+    }
+  }
+  const out: number[] = [];
+  for (let i = 0; i < n; i++) if (keep[i] === 1) out.push(i);
+  if (out.length < minKeep) {
+    // Can only happen when every interior vertex sits within ε of the
+    // endpoint chord — pin the middle vertex to preserve ring-ness.
+    out.splice(1, 0, n >> 1);
+  }
+  return out;
 }
 
 /**
