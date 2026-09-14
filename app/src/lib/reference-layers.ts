@@ -290,13 +290,13 @@ function isPolygonCoordinates(value: unknown): value is RefPosition[][] {
 
 const RAD = Math.PI / 180;
 
-/** Meters per degree of latitude at `latRad` (WGS84 series, < 1 m per degree). */
-function mPerDegLat(latRad: number): number {
+/** Meters per degree of latitude at `latRad` (WGS84 series, < 1 m per degree). Exported for the client cull's planar prefilter (reference-cull.ts). */
+export function mPerDegLat(latRad: number): number {
   return 111132.92 - 559.82 * Math.cos(2 * latRad) + 1.175 * Math.cos(4 * latRad);
 }
 
-/** Meters per degree of longitude at `latRad` (WGS84 series, < 1 m per degree). */
-function mPerDegLon(latRad: number): number {
+/** Meters per degree of longitude at `latRad` (WGS84 series, < 1 m per degree). Exported for the client cull's planar prefilter (reference-cull.ts). */
+export function mPerDegLon(latRad: number): number {
   return 111412.84 * Math.cos(latRad) - 93.5 * Math.cos(3 * latRad);
 }
 

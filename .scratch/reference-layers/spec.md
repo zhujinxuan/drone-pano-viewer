@@ -37,7 +37,7 @@ Show **externally-owned** geo data — turbine foundations, sensitive/avoidance 
 - Render through the existing overlay seam (`vertexView` flat-ground projection, attach/detach/dispose discipline of the annotation overlay; scene root, not rotated by sphereCorrection):
   - Point → sprite dot in layer color + DOM label (same per-frame projection as annotation labels).
   - LineString → projected polyline. Polygon → boundary polyline + translucent fill (~15% opacity) via the existing triangulation approach.
-  - **Per-pano cull**: features with every vertex > 1100 m from the current camera are not rendered (prefilter is load-time data extent; cull is per-photo render hygiene). Vertex-based, documented.
+  - **Per-pano cull**: features with every vertex > 1100 m from the current camera are not rendered (prefilter is load-time data extent; cull is per-photo render hygiene). Vertex-based, Vincenty-exact. Implementation (ticket 10): per-feature vertices+bbox cached by feature identity; three-tier reject — bbox planar (underestimating, 100 m margin) → per-vertex planar → Vincenty confirm only in-band; verdicts identical to the exact path. Polygon fill triangulation (earcut face indices) is likewise cached per feature — cam changes only recompute vertex positions, never topology.
 - **Layer toolbar**: foldable + draggable floating panel (drag by header; position + fold persisted in localStorage). One row per layer: color swatch, name, visibility checkbox (all visible by default), feature count, warning glyph when `status != "ok"` (tooltip explains).
 - **Click-inspect**: clicking a reference feature opens a small dismissable readout (layer name + properties table; Esc or click-elsewhere closes). Read-only — no editing affordances.
 

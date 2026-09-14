@@ -115,7 +115,7 @@ npm run pano -- view <dir> --layer turbines=turbines.geojson
 **UI contract**:
 
 - **Render** (only when the pano has a camera position + altitude): points → colored dot + DOM label, lines → polylines, polygons → boundary + translucent fill (~15% opacity); same flat-ground projection and per-frame label discipline as annotations.
-- **Per-pano cull**: a feature with every vertex more than 1100 m from the current camera is not drawn — the prefilter bounds the data extent, the cull is per-photo render hygiene.
+- **Per-pano cull**: a feature with every vertex more than 1100 m from the current camera is not drawn — the prefilter bounds the data extent, the cull is per-photo render hygiene. The threshold is Vincenty-exact; the per-switch cost is kept flat by per-feature caches (bbox/vertex prefilter with a safety margin, cached fill triangulation), so dense avoidance polygons don't tax `[`/`]` navigation.
 - **Layer toolbar** (bottom right): foldable, draggable by its header; position + fold persisted in `localStorage` (`pano.refLayerToolbar`). One row per layer: color swatch, name, visibility checkbox (all visible by default), feature count, and a ⚠ glyph when `status != "ok"` (tooltip: "invalid geojson, showing last good" / "file not found") or when `dropped > 0` (tooltip: "N feature(s) dropped: unsupported or invalid geometry"). Zero layers → no toolbar at all.
 - **Click-inspect**: while no capture mode is active, a click on a feature opens a small read-only readout — layer name (with swatch) + every property in file order; Esc, ✕, or a click elsewhere closes. No editing affordances.
 

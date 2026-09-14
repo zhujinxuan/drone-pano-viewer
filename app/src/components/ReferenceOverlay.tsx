@@ -56,8 +56,8 @@ import {
   type InspectPath,
   type ScreenPoint,
 } from "../lib/reference-inspect";
-import { featureIsCulled, geometryVertices } from "../lib/reference-cull";
-import type { RefGeometry, RefLayerPayload, RefPosition } from "../lib/reference-layers";
+import { cullEntry, entryIsCulled, type CullEntry } from "../lib/reference-cull";
+import type { RefFeature, RefGeometry, RefLayerPayload, RefPosition } from "../lib/reference-layers";
 import "./ReferenceOverlay.css";
 
 export interface ReferenceOverlayProps {
@@ -108,6 +108,35 @@ const INSPECT_HIT_PX = 14;
 /** Same drag-guard slop as App's CLICK_SLOP_PX (kept local: App doesn't
  * export it, and the two must not import each other). */
 const CLICK_SLOP_PX = 6;
+
+/* ---------- per-feature caches (ticket 10) ----------
+ *
+ * Payload features pass through by reference (lossless invariant), so object
+ * identity is stable until a layer reload replaces them — WeakMap keys give
+ * us cache invalidation for free: a reload's new objects miss, the old
+ * entries are GC'd. Two caches share that key:
+ *
+ *  - cullEntries: flattened vertices + bbox for the two-tier cull (the
+ *    per-switch Vincenty-per-vertex scan was the dominant switch cost with
+ *    dense avoidance polygons — ~160 k geodesic calls per keypress).
+ *  - fillFaces: earcut face indices of a Polygon fill. The indices address
+ *    the flattened ring vertex list, whose composition is cam-independent;
+ *    between switches only the vertex POSITIONS change (near-affine
+ *    tangent-plane reprojection keeps a valid triangulation valid — fills
+ *    are 15%-opacity decoration, sliver-level deviations are invisible).
+ */
+
+const cullEntries = new WeakMap<RefFeature, CullEntry>();
+const fillFaces = new WeakMap<RefFeature, readonly number[][] | null>();
+
+function entryFor(f: RefFeature): CullEntry {
+  let e = cullEntries.get(f);
+  if (e === undefined) {
+    e = cullEntry(f.geometry);
+    cullEntries.set(f, e);
+  }
+  return e;
+}
 
 /* ---------- pure helpers ---------- */
 
@@ -163,7 +192,7 @@ function labeledPoints(
     if (visible[layer.name] === false) continue;
     layer.features.features.forEach((f, i) => {
       if (f.geometry.type !== "Point") return;
-      if (featureIsCulled(cam, geometryVertices(f.geometry))) return;
+      if (entryIsCulled(cam, entryFor(f))) return;
       const text = pointLabel(layer.labelProp, f.properties);
       if (text === null) return;
       out.push({ key: `${layer.name}#${i}`, vertex: f.geometry.coordinates, text, color: layer.color });
@@ -241,15 +270,16 @@ function makeLine(
 }
 
 /**
- * Triangulate a polygon onto the sphere like the annotation fill: project
- * every ring onto one tangent plane (basis from all rings' points — a shared
- * frame keeps exterior and holes coherent), then ShapeUtils with the
- * interior rings as holes. Chord sag is ≪ a pixel for ≤ 5 km edges on the
- * radius-10 sphere (see AnnotationOverlay's geometry notes).
+ * Earcut face indices of a polygon's rings: project every ring onto one
+ * tangent plane (basis from all rings' points — a shared frame keeps
+ * exterior and holes coherent), then ShapeUtils with the interior rings as
+ * holes. Returns null when there is nothing to fill (degenerate contour or
+ * empty triangulation). The result is cached per feature (fillFaces): the
+ * indices address the flattened ring vertex list, which is cam-independent.
  */
-function makeFill(build: OverlayBuild, rings: Vector3[][], material: MeshBasicMaterial): void {
+function triangulateRings(rings: Vector3[][]): readonly number[][] | null {
   const contour = rings[0];
-  if (contour === undefined || contour.length < 3) return;
+  if (contour === undefined || contour.length < 3) return null;
   const holes = rings.slice(1).filter((r) => r.length >= 3);
   const all = [contour, ...holes];
 
@@ -269,9 +299,32 @@ function makeFill(build: OverlayBuild, rings: Vector3[][], material: MeshBasicMa
 
   const to2D = (r: Vector3[]): Vector2[] => r.map((p) => new Vector2(p.dot(e1), p.dot(e2)));
   const faces = ShapeUtils.triangulateShape(to2D(contour), holes.map(to2D));
-  if (faces.length === 0) return;
+  return faces.length === 0 ? null : faces;
+}
 
-  const pts = all.flat();
+/**
+ * Polygon fill mesh on the sphere, like the annotation fill. Faces come from
+ * the per-feature cache (computed on the first build that draws this
+ * feature); only vertex positions are recomputed per rebuild. Chord sag is
+ * ≪ a pixel for ≤ 5 km edges on the radius-10 sphere (see
+ * AnnotationOverlay's geometry notes).
+ */
+function makeFill(
+  build: OverlayBuild,
+  feature: RefFeature,
+  rings: Vector3[][],
+  material: MeshBasicMaterial,
+): void {
+  let faces = fillFaces.get(feature);
+  if (faces === undefined) {
+    faces = triangulateRings(rings);
+    fillFaces.set(feature, faces);
+  }
+  if (faces === null) return;
+
+  // Same flattening triangulateRings indexed into: contour + holes with ≥ 3
+  // points, in order. Anything else would shift the cached indices.
+  const pts = [rings[0]!, ...rings.slice(1).filter((r) => r.length >= 3)].flat();
   const arr = new Float32Array(faces.length * 9);
   let k = 0;
   for (const face of faces) {
@@ -332,7 +385,7 @@ function buildReferenceOverlay(
     build.materials.push(fillMat);
 
     for (const f of features) {
-      if (featureIsCulled(cam, geometryVertices(f.geometry))) continue;
+      if (entryIsCulled(cam, entryFor(f))) continue;
       switch (f.geometry.type) {
         case "Point": {
           const [p] = rayPositions(viewer, cam, [f.geometry.coordinates], RADIUS);
@@ -348,14 +401,14 @@ function buildReferenceOverlay(
         }
         case "Polygon": {
           const rings = f.geometry.coordinates.map(openRing);
-          for (const ring of rings) {
-            makeLine(build, rayPositions(viewer, cam, ring, RADIUS), strokeMat, true);
+          // One projection per vertex, shared by the boundary strokes and the
+          // fill — dense producer polygons (60 k+ vertices) make the double
+          // projection the residual per-switch cost.
+          const ringPts = rings.map((r) => rayPositions(viewer, cam, r, RADIUS));
+          for (const pts of ringPts) {
+            makeLine(build, pts, strokeMat, true);
           }
-          makeFill(
-            build,
-            rings.map((r) => rayPositions(viewer, cam, r, RADIUS)),
-            fillMat,
-          );
+          makeFill(build, f, ringPts, fillMat);
           break;
         }
       }
@@ -431,7 +484,7 @@ function inspectAt(
     if (visible[layer.name] === false) continue;
     for (const f of layer.features.features) {
       // Culled features are not rendered — nothing to click.
-      if (featureIsCulled(cam, geometryVertices(f.geometry))) continue;
+      if (entryIsCulled(cam, entryFor(f))) continue;
       candidates.push({
         layerName: layer.name,
         color: layer.color,
@@ -450,7 +503,9 @@ export default function ReferenceOverlay({ viewer, cam, layers, visible, onInspe
   const labels = labeledPoints(cam, layers, visible);
 
   // Three.js scene graph: full rebuild on any prop change, full disposal on
-  // teardown / rebuild — nothing survives a photo switch or a layer reload.
+  // teardown / rebuild. What survives a photo switch is only the per-feature
+  // CPU-side caches above (cull entries, triangulation faces) — every
+  // GPU-backed object is recreated and disposed here.
   useEffect(() => {
     const build = buildReferenceOverlay(viewer, cam, layers, visible);
     viewer.renderer.addObject(build.group);
