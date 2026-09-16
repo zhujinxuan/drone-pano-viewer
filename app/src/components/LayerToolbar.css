@@ -113,6 +113,22 @@
   white-space: nowrap;
 }
 
+/* Ticket 16: a visible layer whose overlay slice is still building pulses. */
+.lt-name.is-building {
+  font-style: italic;
+  animation: lt-building 1.1s ease-in-out infinite;
+}
+
+@keyframes lt-building {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
 .lt-warn {
   flex: none;
   color: #fdd663;

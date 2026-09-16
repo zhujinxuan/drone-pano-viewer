@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Viewer } from "@photo-sphere-viewer/core";
 import { CompassPlugin } from "@photo-sphere-viewer/compass-plugin";
 import "@photo-sphere-viewer/core/index.css";
@@ -21,6 +21,7 @@ import {
 } from "./lib/annotations";
 import { centroidView, groundTarget, type GroundCam } from "./lib/ground-capture";
 import type { RefLayerPayload } from "./lib/reference-layers";
+import { seedVisibility } from "./lib/reference-build";
 import type { InspectHit } from "./lib/reference-inspect";
 import { formatMeasureChip, measureBetween, type MeasurePoint } from "./lib/measure";
 import MeasureOverlay from "./components/MeasureOverlay";
@@ -33,6 +34,8 @@ import AnnotationPanel from "./components/AnnotationPanel";
 
 const DEG = 180 / Math.PI;
 const FLASH_MS = 1250;
+/** Stable empty array — a fresh `?? []` per render would restart the overlay's effects. */
+const EMPTY_LAYERS: RefLayerPayload[] = [];
 
 declare global {
   interface Window {
@@ -132,6 +135,14 @@ export default function App() {
   // Visibility per layer name, all-true on load — ticket 04's toolbar is
   // the only writer; the overlay reads it (absent name = visible).
   const [layerVisible, setLayerVisible] = useState<Record<string, boolean>>({});
+  // Per-layer overlay build progress (ticket 16): ReferenceOverlay reports
+  // "building" → "ready" per visible layer; the toolbar styles the name
+  // while building. Stale entries for hidden/removed layers are harmless —
+  // the toolbar only styles "building" rows.
+  const [layerStatus, setLayerStatus] = useState<Record<string, "building" | "ready">>({});
+  const onLayerStatus = useCallback((name: string, status: "building" | "ready") => {
+    setLayerStatus((prev) => (prev[name] === status ? prev : { ...prev, [name]: status }));
+  }, []);
   // Click-inspect readout (ticket 04): the hit under the last idle-mode
   // click, or null. Cleared by Esc / click-elsewhere (the overlay reports
   // a miss as null) and on pano switch — the hit's feature may be culled
@@ -154,13 +165,22 @@ export default function App() {
 
   // Camera fix for measurement + capture: XMP GPS when the panel has it,
   // else the geohash8 stem fallback (same precedence as the copy record).
-  const camFix: CameraFix | null =
-    gpsFix ??
-    (current !== null && current.lon !== null && current.lat !== null
-      ? { lat: current.lat, lon: current.lon, source: "geohash" }
-      : null);
-  const groundCam: GroundCam | null =
-    camFix !== null && relAlt !== null && relAlt > 0 ? { ...camFix, relAltM: relAlt } : null;
+  // Memoized on VALUE identity: an unmemoized object here is a new prop
+  // every App render, and the overlay effects dep on it — HUD ticks (10 Hz)
+  // used to restart the whole reference-overlay build mid-drag (2026-09-16
+  // smoke: layers stuck "building", candidates alone completing).
+  const camFix: CameraFix | null = useMemo(
+    () =>
+      gpsFix ??
+      (current !== null && current.lon !== null && current.lat !== null
+        ? { lat: current.lat, lon: current.lon, source: "geohash" as const }
+        : null),
+    [gpsFix, current],
+  );
+  const groundCam: GroundCam | null = useMemo(
+    () => (camFix !== null && relAlt !== null && relAlt > 0 ? { ...camFix, relAltM: relAlt } : null),
+    [camFix, relAlt],
+  );
   // Annotation needs a loaded outbox, a camera position and an altitude.
   const canAnnotate = current !== null && groundCam !== null && anns !== null;
   const annCam: AnnDraft["cam"] | null =
@@ -296,12 +316,9 @@ export default function App() {
         .then((json) => {
           if (cancelled) return;
           setRefLayers(json.layers);
-          // (Re)seed visibility: every layer visible unless already toggled.
-          setLayerVisible((prev) => {
-            const next: Record<string, boolean> = {};
-            for (const l of json.layers) next[l.name] = prev[l.name] ?? true;
-            return next;
-          });
+          // (Re)seed visibility (ticket 17): a layer stays as the user
+          // toggled it; a newly-seen heavy layer starts hidden.
+          setLayerVisible((prev) => seedVisibility(json.layers, prev));
         })
         .catch(() => {});
     };
@@ -838,15 +855,17 @@ export default function App() {
           <ReferenceOverlay
             viewer={viewerObj}
             cam={groundCam}
-            layers={refLayers ?? []}
+            layers={refLayers ?? EMPTY_LAYERS}
             visible={layerVisible}
             onInspect={onRefInspect}
+            onLayerStatus={onLayerStatus}
           />
         )}
         {refLayers !== null && refLayers.length > 0 && (
           <LayerToolbar
             layers={refLayers}
             visible={layerVisible}
+            status={layerStatus}
             onToggleVisible={toggleLayerVisible}
           />
         )}

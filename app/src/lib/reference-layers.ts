@@ -409,7 +409,31 @@ export interface RefLayerPayload {
   status: "ok" | "invalid" | "missing";
   /** Features/parts dropped at load (invalid geometry) — toolbar ⚠s when > 0. */
   dropped: number;
+  /**
+   * Served vertex count (Point 1, LineString its length, Polygon its ring
+   * sum) — the payload carries it so consumers can weigh a layer without
+   * re-walking its features. 0 while empty/missing; an invalid layer keeps
+   * the last-good count alongside its last-good features.
+   */
+  vertices: number;
   features: { type: "FeatureCollection"; features: RefFeature[] };
+}
+
+/**
+ * Vertex count of a served feature set: Point 1, LineString its position
+ * count, Polygon the sum of its ring lengths. The payload's `vertices` and
+ * the wiring's vertex-budget warning both come from this one pass, so the
+ * two can never drift.
+ */
+export function servedVertexCount(features: readonly RefFeature[]): number {
+  let count = 0;
+  for (const feature of features) {
+    const geometry = feature.geometry;
+    if (geometry.type === "Point") count += 1;
+    else if (geometry.type === "LineString") count += geometry.coordinates.length;
+    else for (const ring of geometry.coordinates) count += ring.length;
+  }
+  return count;
 }
 
 // ---- Watch state machine (ticket 02) ----------------------------------------
@@ -457,6 +481,7 @@ export function createLayerState(spec: RefLayerSpec): RefLayerState {
       labelProp: spec.labelProp ?? null,
       status: "missing",
       dropped: 0,
+      vertices: 0,
       features: { type: "FeatureCollection", features: [] },
     },
     retryPending: false,
@@ -477,7 +502,8 @@ export function createLayerState(spec: RefLayerSpec): RefLayerState {
  * `changed` compares status + dropped + filtered features, so a rewrite
  * that alters none of them emits nothing (key-order-sensitive — a
  * reorder-only rewrite may push once; the refetch is idempotent, so
- * benign).
+ * benign). `vertices` is a pure function of the served features, so it
+ * needs no comparison of its own — features moved ⇒ count moved.
  */
 export function acceptLayerProbe(
   prev: RefLayerState,
@@ -499,6 +525,7 @@ export function acceptLayerProbe(
     ...prev.payload,
     status: (probe.read === "ok" ? "ok" : "missing") as RefLayerPayload["status"],
     dropped: probe.read === "ok" ? probe.dropped : 0,
+    vertices: servedVertexCount(features),
     features: { type: "FeatureCollection" as const, features },
   };
   const changed =

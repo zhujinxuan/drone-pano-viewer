@@ -114,6 +114,13 @@ declare module "three" {
     computeLineDistances(): this;
   }
 
+  /** Segment-pair variant of Line — the batched stroke primitive (ticket 15). */
+  export class LineSegments extends Object3D {
+    constructor(geometry?: BufferGeometry, material?: Material | Material[]);
+    geometry: BufferGeometry;
+    material: Material | Material[];
+  }
+
   export class Mesh extends Object3D {
     constructor(geometry?: BufferGeometry, material?: Material | Material[]);
     geometry: BufferGeometry;

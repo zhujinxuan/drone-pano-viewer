@@ -18,6 +18,7 @@
  */
 import { vincentyInverse } from "./geodesy.ts";
 import { mPerDegLat, mPerDegLon } from "./reference-layers.ts";
+import { NEAR_BAND_M } from "./reference-lod.ts";
 import type { RefGeometry, RefPosition } from "./reference-layers.ts";
 
 /** Spec: features with every vertex > 700 m from the camera are not drawn. */
@@ -111,6 +112,29 @@ const CULL_BAND_MARGIN_M = 100;
 const RAD = Math.PI / 180;
 
 /**
+ * The underestimating planar scales of a cam/bbox pair (see
+ * CULL_BAND_MARGIN_M): mPerDegLon shrinks pole-wards (evaluate at the
+ * pole-wards extreme), mPerDegLat shrinks equator-wards (evaluate at the
+ * equator-wards extreme), so distances computed with them under-read the
+ * truth for every vertex of the feature.
+ */
+function underestimatingScales(
+  cam: CullCam,
+  bbox: readonly [number, number, number, number],
+): { sx: number; sy: number } {
+  const latLonScale = Math.max(Math.abs(cam.lat), Math.abs(bbox[1]), Math.abs(bbox[3])) * RAD;
+  const latLatScale = Math.min(Math.abs(cam.lat), Math.abs(bbox[1]), Math.abs(bbox[3])) * RAD;
+  return { sx: mPerDegLon(latLonScale), sy: mPerDegLat(latLatScale) };
+}
+
+/** Planar bbox-to-cam distance with given scales (underestimating). */
+function bboxDistance(cam: CullCam, bbox: readonly [number, number, number, number], sx: number, sy: number): number {
+  const bx = Math.max(bbox[0] - cam.lon, cam.lon - bbox[2], 0) * sx;
+  const by = Math.max(bbox[1] - cam.lat, cam.lat - bbox[3], 0) * sy;
+  return Math.hypot(bx, by);
+}
+
+/**
  * Same verdict as {@link featureIsCulled}, three-tier: a feature whose bbox
  * clears `radiusM + margin` from the camera in the (underestimating) planar
  * approximation is culled with no geodesic work; within the band, every
@@ -127,23 +151,44 @@ export function entryIsCulled(
 ): boolean {
   const { vertices, bbox } = entry;
   if (vertices.length === 0) return true;
-  // Scales chosen to UNDER-estimate: mPerDegLon shrinks pole-wards (evaluate
-  // at the pole-wards extreme), mPerDegLat shrinks equator-wards (evaluate at
-  // the equator-wards extreme). The same two scales underestimate for every
-  // vertex of the feature, so the per-vertex tier inherits the guarantee.
-  const latLonScale = Math.max(Math.abs(cam.lat), Math.abs(bbox[1]), Math.abs(bbox[3])) * RAD;
-  const latLatScale = Math.min(Math.abs(cam.lat), Math.abs(bbox[1]), Math.abs(bbox[3])) * RAD;
-  const sx = mPerDegLon(latLonScale);
-  const sy = mPerDegLat(latLatScale);
-  const bx = Math.max(bbox[0] - cam.lon, cam.lon - bbox[2], 0) * sx;
-  const by = Math.max(bbox[1] - cam.lat, cam.lat - bbox[3], 0) * sy;
+  const { sx, sy } = underestimatingScales(cam, bbox);
   const limit = radiusM + CULL_BAND_MARGIN_M;
-  if (Math.hypot(bx, by) > limit) return true;
+  if (bboxDistance(cam, bbox, sx, sy) > limit) return true;
   for (const [lon, lat] of vertices) {
     const dx = (lon - cam.lon) * sx;
     const dy = (lat - cam.lat) * sy;
     if (dx * dx + dy * dy > limit * limit) continue;
     if (vincentyInverse(cam.lat, cam.lon, lat, lon).distanceM <= radiusM) return false;
+  }
+  return true;
+}
+
+/**
+ * LOD band verdict (ticket 14): true when the feature is certainly FAR —
+ * every vertex beyond `bandM` (default {@link NEAR_BAND_M}) from the camera.
+ * Same underestimating scales as the cull, so the directions stay
+ * conservative: an underestimated distance beyond the band means the true
+ * distance is beyond it too, while any vertex whose estimate falls inside
+ * the band flips the feature to near (full fidelity) — a borderline feature
+ * never renders coarse. Bbox fast path first; the per-vertex scan is planar
+ * arithmetic with early exit (no Vincenty — band precision is not
+ * spec-pinned the way the 700 m cull threshold is). An empty vertex list is
+ * "near" — harmless, the cull drops it upstream anyway.
+ */
+export function entryIsFar(
+  cam: CullCam,
+  entry: CullEntry,
+  bandM: number = NEAR_BAND_M,
+): boolean {
+  const { vertices, bbox } = entry;
+  if (vertices.length === 0) return false;
+  const { sx, sy } = underestimatingScales(cam, bbox);
+  if (bboxDistance(cam, bbox, sx, sy) > bandM) return true;
+  const band2 = bandM * bandM;
+  for (const [lon, lat] of vertices) {
+    const dx = (lon - cam.lon) * sx;
+    const dy = (lat - cam.lat) * sy;
+    if (dx * dx + dy * dy <= band2) return false;
   }
   return true;
 }

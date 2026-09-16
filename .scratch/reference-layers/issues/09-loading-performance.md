@@ -1,6 +1,6 @@
 # 09 — Loading performance: 4.9 MB uncompressed layer JSON, dev-mode vite, no pano preload
 
-**Status:** ready-for-agent (items 1+4 only — see triage comment)
+**Status:** done (items 1+4 — implemented by ticket 13)
 
 **Note (2026-09-14):** tickets 07/08 are being fixed by another agent in parallel — this ticket is independent (payload size / transport / decode, not correctness).
 

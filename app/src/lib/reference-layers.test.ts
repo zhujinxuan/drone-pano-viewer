@@ -13,6 +13,7 @@ import {
   filterByCircleUnion,
   parseLayerSpecs,
   parseReferenceGeoJSON,
+  servedVertexCount,
   type RefFeature,
   type RefLayerPayload,
   type RefLayerSpec,
@@ -501,7 +502,8 @@ function watchState(
   dropped = 0,
 ): RefLayerState {
   return {
-    payload: { name: "a", color: "#e69f00", labelProp: null, status, dropped, features: { type: "FeatureCollection", features } },
+    // fixtures here are Points — one vertex each, so length is the count
+    payload: { name: "a", color: "#e69f00", labelProp: null, status, dropped, vertices: features.length, features: { type: "FeatureCollection", features } },
     retryPending,
   };
 }
@@ -515,10 +517,32 @@ describe("createLayerState", () => {
         labelProp: null,
         status: "missing",
         dropped: 0,
+        vertices: 0,
         features: { type: "FeatureCollection", features: [] },
       },
       retryPending: false,
     });
+  });
+});
+
+describe("servedVertexCount", () => {
+  it("counts Point 1, LineString its length, Polygon the sum of its ring lengths", () => {
+    const point: RefFeature = { type: "Feature", geometry: { type: "Point", coordinates: [LON, LAT] }, properties: {} };
+    const line: RefFeature = {
+      type: "Feature",
+      geometry: { type: "LineString", coordinates: [[LON, LAT], [LON, LAT], [LON, LAT], [LON, LAT]] },
+      properties: {},
+    };
+    const polygon: RefFeature = {
+      type: "Feature",
+      geometry: { type: "Polygon", coordinates: [[[LON, LAT], [LON, LAT], [LON, LAT]], [[LON, LAT], [LON, LAT]]] },
+      properties: {},
+    };
+    expect(servedVertexCount([])).toBe(0);
+    expect(servedVertexCount([point])).toBe(1);
+    expect(servedVertexCount([line])).toBe(4);
+    expect(servedVertexCount([polygon])).toBe(5); // rings counted as-is, closure not required
+    expect(servedVertexCount([point, line, polygon])).toBe(10);
   });
 });
 
@@ -610,6 +634,21 @@ describe("acceptLayerProbe", () => {
     expect(terminal.state.payload.dropped).toBe(2); // last-good count survives the terminal flip
     expect(terminal.changed).toBe(true); // status ok → invalid
   });
+
+  it("surfaces the served vertex count on the payload — the filtered set, and missing → 0", () => {
+    const ok = acceptLayerProbe(watchState("ok", [nearPt]), { read: "ok", features: [nearPt, nearPtB, farPt], dropped: 0 }, C);
+    expect(ok.state.payload.vertices).toBe(2); // farPt's vertex never serves
+    const gone = acceptLayerProbe(ok.state, { read: "missing" }, C);
+    expect(gone.state.payload.vertices).toBe(0);
+  });
+
+  it("keeps the last-good vertex count across a deferral and a terminal invalid", () => {
+    const loaded = acceptLayerProbe(watchState("ok", [nearPt, nearPtB]), { read: "ok", features: [nearPt, nearPtB], dropped: 0 }, C).state;
+    const deferred = acceptLayerProbe(loaded, { read: "error", message: "half-written" }, C);
+    expect(deferred.state.payload.vertices).toBe(2); // deferral leaves the payload untouched
+    const terminal = acceptLayerProbe(deferred.state, { read: "error", message: "still bad" }, C);
+    expect(terminal.state.payload.vertices).toBe(2); // the count survives the terminal flip with its features
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -620,6 +659,7 @@ describe("acceptLayerProbe", () => {
 // like cli.ts sets it before createServer: configure the env, then start().
 
 class MockReq extends EventEmitter {
+  headers: Record<string, string> = {};
   constructor(readonly method: string) {
     super();
   }
@@ -799,8 +839,8 @@ describe("GET /api/reference-layers (boot state)", () => {
     // and the edge-crossing line survive the union prefilter, both whole.
     expect(get(handler)).toEqual({
       layers: [
-        { name: "a", color: "#e69f00", labelProp: "tid", status: "ok", dropped: 0, features: { type: "FeatureCollection", features: [nearA] } },
-        { name: "b", color: "#0072b2", labelProp: null, status: "ok", dropped: 0, features: { type: "FeatureCollection", features: [crossing] } },
+        { name: "a", color: "#e69f00", labelProp: "tid", status: "ok", dropped: 0, vertices: 1, features: { type: "FeatureCollection", features: [nearA] } },
+        { name: "b", color: "#0072b2", labelProp: null, status: "ok", dropped: 0, vertices: 2, features: { type: "FeatureCollection", features: [crossing] } },
       ],
     });
   });
@@ -812,7 +852,7 @@ describe("GET /api/reference-layers (boot state)", () => {
     ]);
     const { handler } = start();
     expect(get(handler)).toEqual({
-      layers: [{ name: "gone", color: "#e69f00", labelProp: null, status: "missing", dropped: 0, features: { type: "FeatureCollection", features: [] } }],
+      layers: [{ name: "gone", color: "#e69f00", labelProp: null, status: "missing", dropped: 0, vertices: 0, features: { type: "FeatureCollection", features: [] } }],
     });
     expect(console.warn).not.toHaveBeenCalled();
   });
@@ -826,7 +866,7 @@ describe("GET /api/reference-layers (boot state)", () => {
     ]);
     const { handler } = start();
     expect(get(handler)).toEqual({
-      layers: [{ name: "bad", color: "#e69f00", labelProp: null, status: "invalid", dropped: 0, features: { type: "FeatureCollection", features: [] } }],
+      layers: [{ name: "bad", color: "#e69f00", labelProp: null, status: "invalid", dropped: 0, vertices: 0, features: { type: "FeatureCollection", features: [] } }],
     });
     expect(console.warn).toHaveBeenCalled();
   });
@@ -842,7 +882,7 @@ describe("GET /api/reference-layers (boot state)", () => {
     process.env.PANO_REFERENCE_LAYERS = JSON.stringify([{ name: "a", path: f, color: "#e69f00", labelProp: null }]);
     const { handler } = start();
     expect(get(handler)).toEqual({
-      layers: [{ name: "a", color: "#e69f00", labelProp: null, status: "ok", dropped: 0, features: { type: "FeatureCollection", features: [] } }],
+      layers: [{ name: "a", color: "#e69f00", labelProp: null, status: "ok", dropped: 0, vertices: 0, features: { type: "FeatureCollection", features: [] } }],
     });
   });
 

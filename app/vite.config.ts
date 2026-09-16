@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import zlib from "node:zlib";
 import react from "@vitejs/plugin-react";
 import { defineConfig, type Plugin } from "vite";
 import type { LonLat } from "./src/lib/geohash.ts";
@@ -207,6 +208,10 @@ export function panoAnnotations(): Plugin {
 const WATCH_DEBOUNCE_MS = 300;
 const RETRY_AFTER_MS = 300;
 
+/** Served vertices past which an accepted load warns: producer-side
+ * simplification is otherwise invisible to app users (ticket 09 item 4). */
+const VERTEX_BUDGET = 200_000;
+
 /**
  * Dev-server middleware + watcher exposing the read-only reference layers.
  * Layer specs arrive via `PANO_REFERENCE_LAYERS` (JSON array set by cli.ts:
@@ -216,7 +221,12 @@ const RETRY_AFTER_MS = 300;
  * cached state current.
  *
  *  - GET /api/reference-layers → { layers: [{ name, color, labelProp,
- *    status, features }] } served from the cache — but first each watched
+ *    status, dropped, vertices, features }] } served from a cached
+ *    serialization: the body and its gzip bytes are computed once per
+ *    accepted state change (boot load, watch reload, retry, mtime re-probe)
+ *    and reused — never JSON.stringify + gzip per request. A client whose
+ *    Accept-Encoding includes gzip gets the cached bytes with
+ *    Content-Encoding: gzip, everyone else identity. But first each watched
  *    file is stat'd, and any mtime/presence change since its last probe
  *    reloads through the shared watch path (spec §Watch semantics): a lost
  *    watch event can't outlive one request. Files with a debounce/retry
@@ -226,6 +236,8 @@ const RETRY_AFTER_MS = 300;
  *    a review restriction, not a data extent). No clipping: features pass
  *    through verbatim. The union is recomputed on each watch reload, so
  *    newly pulled panos widen the prefilter on the next layer-file change.
+ *    An accepted load over 200 000 served vertices warns once (layer name +
+ *    simplify producer-side) — the cost is otherwise invisible to producers.
  *  - Watch (Vite's own watcher, no new deps): 300 ms debounce per file, then
  *    re-read + re-filter; any accepted state change pushes
  *    `reference-layers:changed` over ws (no payload — clients refetch). A
@@ -256,6 +268,11 @@ export function panoReferenceLayers(): Plugin {
       // a lost watch event cannot outlive one GET.
       const stamps = new Map<string, number>();
 
+      // Response bytes cached with the state (ticket 13): the multi-MB
+      // payload must not pay JSON.stringify + gzip on every request.
+      // Undefined = stale; every accept() invalidates, the GET rebuilds.
+      let response: { json: string; gzip: Buffer } | undefined;
+
       // Probe one layer file and fold the result into the live state. The
       // stamp is taken before the read: if the file changes in between, the
       // stamp is older than the cached content and the next check re-probes
@@ -266,6 +283,12 @@ export function panoReferenceLayers(): Plugin {
         stamps.set(file, mtimeMs);
         const transition = acceptLayerProbe(layers[index]!, probe, union);
         layers[index] = transition.state;
+        response = undefined; // state moved (or re-accepted) — the next GET re-serializes
+        if (probe.read === "ok" && transition.state.payload.vertices > VERTEX_BUDGET) {
+          console.warn(
+            `pano: reference layer "${transition.state.payload.name}" serves ${transition.state.payload.vertices} vertices (> ${VERTEX_BUDGET}) — heavy on every client load; simplify producer-side (e.g. 2 m Douglas-Peucker)`,
+          );
+        }
         if (transition.invalid && probe.read === "error") {
           console.warn(
             `pano: reference layer "${transition.state.payload.name}" unreadable/corrupt — keeping last-known features (${probe.message})`,
@@ -333,7 +356,7 @@ export function panoReferenceLayers(): Plugin {
         if (changed) server.ws.send("reference-layers:changed");
       };
 
-      server.middlewares.use("/api/reference-layers", (_req, res) => {
+      server.middlewares.use("/api/reference-layers", (req, res) => {
         // Request-time mtime safety net: stat every watched file and reload
         // any whose mtime/presence moved since its last probe — the bound on
         // a lost watch event (one request). One stat per file per request.
@@ -345,8 +368,20 @@ export function panoReferenceLayers(): Plugin {
           if (debounces.has(file) || retries.has(file)) continue;
           if (statMtimeMs(file) !== (stamps.get(file) ?? 0)) reload(file);
         }
+        if (!response) {
+          const json = JSON.stringify({ layers: layers.map((layer) => layer.payload) });
+          response = { json, gzip: zlib.gzipSync(json) };
+        }
         res.setHeader("Content-Type", "application/json; charset=utf-8");
-        res.end(JSON.stringify({ layers: layers.map((layer) => layer.payload) }));
+        // Accept-Encoding is a comma list ("gzip, deflate, br") — a plain
+        // substring test matches every real browser and q-value-free client
+        // while leaving plain curl identity.
+        if (String(req.headers["accept-encoding"] ?? "").includes("gzip")) {
+          res.setHeader("Content-Encoding", "gzip");
+          res.end(response.gzip);
+        } else {
+          res.end(response.json);
+        }
       });
 
       // Watch wiring: one debounce timer per file (in `debounces` above); a

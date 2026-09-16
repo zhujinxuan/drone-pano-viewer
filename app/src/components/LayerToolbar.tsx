@@ -19,6 +19,7 @@
 import { useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import type { RefLayerPayload } from "../lib/reference-layers";
+import { SLOW_LAYER_VERTEX_BUDGET } from "../lib/reference-lod";
 import type { InspectHit } from "../lib/reference-inspect";
 import "./LayerToolbar.css";
 
@@ -32,6 +33,8 @@ export interface LayerToolbarProps {
   layers: readonly RefLayerPayload[];
   /** Layer name → visible (absent = visible); App owns it, we only toggle. */
   visible: Readonly<Record<string, boolean>>;
+  /** Layer name → overlay build progress (ticket 16); absent = not building. */
+  status: Readonly<Record<string, "building" | "ready">>;
   /** Flip one layer's visibility. */
   onToggleVisible: (name: string) => void;
 }
@@ -104,7 +107,7 @@ function droppedTip(dropped: number): string {
   return `${dropped} feature(s) dropped: unsupported or invalid geometry`;
 }
 
-export default function LayerToolbar({ layers, visible, onToggleVisible }: LayerToolbarProps) {
+export default function LayerToolbar({ layers, visible, status, onToggleVisible }: LayerToolbarProps) {
   const [panel, setPanel] = useState<PanelState>(loadPanelState);
   // Latest geometry outside React's batching: the drag-end persist must see
   // the final move even if pointerup lands before the last re-render.
@@ -183,26 +186,38 @@ export default function LayerToolbar({ layers, visible, onToggleVisible }: Layer
       </div>
       {!panel.folded && (
         <div className="lt-body">
-          {layers.map((l) => (
-            <label key={l.name} className="lt-row" title={l.name}>
-              <input
-                type="checkbox"
-                checked={visible[l.name] ?? true}
-                onChange={() => onToggleVisible(l.name)}
-              />
-              <span className="lt-swatch" style={{ background: l.color }} />
-              <span className="lt-name">{l.name}</span>
-              {(l.status !== "ok" || l.dropped > 0) && (
-                <span
-                  className="lt-warn"
-                  title={l.status !== "ok" ? statusTip(l.status) : droppedTip(l.dropped)}
-                >
-                  ⚠
-                </span>
-              )}
-              <span className="lt-count">{l.features.features.length}</span>
-            </label>
-          ))}
+          {layers.map((l) => {
+            const heavy = l.vertices > SLOW_LAYER_VERTEX_BUDGET;
+            const building = status[l.name] === "building" && (visible[l.name] ?? true);
+            return (
+              <label
+                key={l.name}
+                className="lt-row"
+                title={
+                  heavy
+                    ? `${l.name} — heavy layer (${l.vertices.toLocaleString()} vertices), hidden by default`
+                    : l.name
+                }
+              >
+                <input
+                  type="checkbox"
+                  checked={visible[l.name] ?? true}
+                  onChange={() => onToggleVisible(l.name)}
+                />
+                <span className="lt-swatch" style={{ background: l.color }} />
+                <span className={building ? "lt-name is-building" : "lt-name"}>{l.name}</span>
+                {(l.status !== "ok" || l.dropped > 0) && (
+                  <span
+                    className="lt-warn"
+                    title={l.status !== "ok" ? statusTip(l.status) : droppedTip(l.dropped)}
+                  >
+                    ⚠
+                  </span>
+                )}
+                <span className="lt-count">{l.features.features.length}</span>
+              </label>
+            );
+          })}
         </div>
       )}
     </div>

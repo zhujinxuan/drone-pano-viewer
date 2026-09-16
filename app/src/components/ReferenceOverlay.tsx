@@ -10,12 +10,16 @@
  *
  * Render discipline mirrors `AnnotationOverlay` / `MeasureOverlay`:
  * `vertexView` flat-ground projection onto the sphere (RADIUS just inside
- * the pano), full rebuild on every prop change, full disposal on
- * teardown/rebuild, objects attached to the scene ROOT via
+ * the pano), objects attached to the scene ROOT via
  * `renderer.addObject` — never the sphereCorrection-rotated mesh container —
  * and DOM labels projected per frame on the PSV "render" event (direct style
  * writes, no per-frame React state). Point dots reuse the annotation dot
  * texture construction (kept local — AnnotationOverlay does not export it).
+ *
+ * Build discipline (tickets 14/15/16): per layer, one batched LineSegments +
+ * one fill Mesh (+ point sprites); layers build one per time slice, cheapest
+ * first, so the pano stays draggable while heavy layers stream in; features
+ * beyond 200 m render from a cached 3 m ground-DP coarse geometry.
  *
  * Per-pano cull (`lib/reference-cull`): a feature with every vertex > 700 m
  * from the camera is not drawn; vertex-based, no clipping. `cam === null`
@@ -28,7 +32,7 @@
  * features in screen space (lib/reference-inspect) and call back with the
  * nearest hit, or null on a click elsewhere (dismiss).
  */
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { CONSTANTS } from "@photo-sphere-viewer/core";
 import type { Viewer } from "@photo-sphere-viewer/core";
 import {
@@ -37,7 +41,7 @@ import {
   CanvasTexture,
   DoubleSide,
   Group,
-  Line,
+  LineSegments,
   LineBasicMaterial,
   Material,
   Mesh,
@@ -56,7 +60,9 @@ import {
   type InspectPath,
   type ScreenPoint,
 } from "../lib/reference-inspect";
-import { cullEntry, entryIsCulled, type CullEntry } from "../lib/reference-cull";
+import { cullEntry, entryIsCulled, entryIsFar, type CullEntry } from "../lib/reference-cull";
+import { lodGeometry } from "../lib/reference-lod";
+import { buildQueue } from "../lib/reference-build";
 import type { RefFeature, RefGeometry, RefLayerPayload, RefPosition } from "../lib/reference-layers";
 import "./ReferenceOverlay.css";
 
@@ -77,6 +83,13 @@ export interface ReferenceOverlayProps {
    * nearest hit under a drag-guarded click, or null on a click elsewhere.
    */
   onInspect: ((hit: InspectHit | null) => void) | null;
+  /**
+   * Per-layer build progress (ticket 16): called with "building" when a
+   * layer's slice is scheduled and "ready" when its objects are in the
+   * scene. App forwards the map to the toolbar. Stable-callback discipline:
+   * it is an effect dep, so App must memoize it.
+   */
+  onLayerStatus?: (name: string, status: "building" | "ready") => void;
 }
 
 /** One DOM-labeled point feature (culled features never get here). */
@@ -128,6 +141,14 @@ const CLICK_SLOP_PX = 6;
 
 const cullEntries = new WeakMap<RefFeature, CullEntry>();
 const fillFaces = new WeakMap<RefFeature, readonly number[][] | null>();
+/**
+ * Far-band caches (ticket 14): the cam-independent coarse geometry per
+ * feature, and the earcut faces of its rings. Coarse rings never change
+ * with the camera, so a far feature's fill triangulates ONCE per payload —
+ * the property ticket 11's cam-dependent decimation couldn't have.
+ */
+const lodGeometries = new WeakMap<RefFeature, RefGeometry>();
+const lodFillFaces = new WeakMap<RefFeature, readonly number[][] | null>();
 
 function entryFor(f: RefFeature): CullEntry {
   let e = cullEntries.get(f);
@@ -136,6 +157,16 @@ function entryFor(f: RefFeature): CullEntry {
     cullEntries.set(f, e);
   }
   return e;
+}
+
+/** Far-band geometry of a feature, built once and cached by identity. */
+function lodGeometryFor(f: RefFeature): RefGeometry {
+  let g = lodGeometries.get(f);
+  if (g === undefined) {
+    g = lodGeometry(f.geometry);
+    lodGeometries.set(f, g);
+  }
+  return g;
 }
 
 /* ---------- pure helpers ---------- */
@@ -311,18 +342,19 @@ function projectedPath(
   return { points: out, decimated: kept.length < vertices.length };
 }
 
-/** Polyline through `points`; `closed` appends the first point again (ring). */
-function makeLine(
-  build: OverlayBuild,
-  points: Vector3[],
-  material: LineBasicMaterial,
-  closed: boolean,
-): void {
+/** Append a path's segments (endpoint pairs) to the layer's stroke soup. */
+function appendStroke(out: number[], points: Vector3[], closed: boolean): void {
   if (points.length < 2) return;
-  const geom = new BufferGeometry();
-  build.geometries.push(geom);
-  geom.setFromPoints(closed ? [...points, points[0]] : points);
-  build.group.add(new Line(geom, material));
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i]!;
+    const b = points[i + 1]!;
+    out.push(a.x, a.y, a.z, b.x, b.y, b.z);
+  }
+  if (closed) {
+    const a = points[points.length - 1]!;
+    const b = points[0]!;
+    out.push(a.x, a.y, a.z, b.x, b.y, b.z);
+  }
 }
 
 /**
@@ -359,147 +391,172 @@ function triangulateRings(rings: Vector3[][]): readonly number[][] | null {
 }
 
 /**
- * Polygon fill mesh on the sphere, like the annotation fill. Faces come from
- * the per-feature cache (computed on the first build that draws this
- * feature); only vertex positions are recomputed per rebuild. `feature` is
- * null for angularly decimated rings (ticket 11) — their indices address one
- * cam's decimated ring, so they triangulate fresh and never touch the cache.
- * Chord sag is ≪ a pixel for ≤ 5 km edges on the radius-10 sphere (see
- * AnnotationOverlay's geometry notes).
+ * Expand earcut faces into the layer's fill triangle soup. `faces` index the
+ * same flattening triangulateRings consumed: contour + holes with ≥ 3
+ * points, in order — anything else would shift the cached indices.
  */
-function makeFill(
-  build: OverlayBuild,
-  feature: RefFeature | null,
-  rings: Vector3[][],
-  material: MeshBasicMaterial,
-): void {
-  let faces: readonly number[][] | null | undefined;
-  if (feature !== null) {
-    faces = fillFaces.get(feature);
-    if (faces === undefined) {
-      faces = triangulateRings(rings);
-      fillFaces.set(feature, faces);
-    }
-  } else {
-    faces = triangulateRings(rings);
-  }
-  if (faces == null) return;
-
-  // Same flattening triangulateRings indexed into: contour + holes with ≥ 3
-  // points, in order. Anything else would shift the cached indices.
+function appendFill(out: number[], rings: Vector3[][], faces: readonly number[][]): void {
   const pts = [rings[0]!, ...rings.slice(1).filter((r) => r.length >= 3)].flat();
-  const arr = new Float32Array(faces.length * 9);
-  let k = 0;
   for (const face of faces) {
     for (const idx of face) {
-      const p = pts[idx];
-      arr[k++] = p.x;
-      arr[k++] = p.y;
-      arr[k++] = p.z;
+      const p = pts[idx]!;
+      out.push(p.x, p.y, p.z);
     }
   }
-  const geom = new BufferGeometry();
-  build.geometries.push(geom);
-  geom.setAttribute("position", new BufferAttribute(arr, 3));
-  build.group.add(new Mesh(geom, material));
 }
 
-/** Rebuild the whole reference scene graph for the current props. */
-function buildReferenceOverlay(
+/** Face indices of a polygon's fill, from the named per-feature cache or fresh. */
+function fillFacesOf(
+  cache: WeakMap<RefFeature, readonly number[][] | null>,
+  feature: RefFeature,
+  rings: Vector3[][],
+): readonly number[][] | null {
+  let faces = cache.get(feature);
+  if (faces === undefined) {
+    faces = triangulateRings(rings);
+    cache.set(feature, faces);
+  }
+  return faces;
+}
+
+/**
+ * Build ONE layer's scene graph (ticket 15 batching + ticket 14 banding).
+ *
+ * Batching: every stroke of the layer lands in a single LineSegments, every
+ * fill in a single non-indexed triangle-soup Mesh — per-layer draw calls
+ * stay ~2 regardless of feature count (the pre-ticket-15 per-ring/per-fill
+ * objects put ~10³ draw calls on every frame of a drag with the reporter's
+ * 5-layer set). Point dots stay sprites on a shared material. Frustum-culling
+ * granularity is surrendered deliberately: everything drawn is within
+ * 700 m of the camera on an always-drawn sphere.
+ *
+ * Banding: a feature with no vertex within NEAR_BAND_M of the camera renders
+ * from its cached coarse geometry (3 m ground DP); only its simplified
+ * rings are projected per switch, and its fill triangulation is
+ * cam-independent (lodFillFaces — computed once per payload). Near features
+ * keep the full-fidelity path: ticket 11 angular DP for > 1000-vertex
+ * features, fillFaces cache for the undecimated, fresh coarser-ε fill for
+ * the decimated. Chord sag stays ≪ a pixel for ≤ 5 km edges on the
+ * radius-10 sphere (see AnnotationOverlay's geometry notes).
+ */
+function buildLayerOverlay(
   viewer: Viewer,
-  cam: OverlayCam | null,
-  layers: readonly RefLayerPayload[],
-  visible: Readonly<Record<string, boolean>>,
+  cam: OverlayCam,
+  layer: RefLayerPayload,
 ): OverlayBuild {
   const build = new OverlayBuild();
-  if (cam === null) return build;
+  const features = layer.features.features;
+  if (features.length === 0) return build;
 
+  const color = colorNum(layer.color);
   const texture = makeDotTexture();
   build.textures.push(texture);
+  const dotMat = new SpriteMaterial({
+    map: texture,
+    color,
+    transparent: true,
+    opacity: 0.95,
+    depthWrite: false,
+  });
+  build.materials.push(dotMat);
+  const strokeMat = new LineBasicMaterial({
+    color,
+    transparent: true,
+    opacity: STROKE_OPACITY,
+    depthWrite: false,
+  });
+  build.materials.push(strokeMat);
+  const fillMat = new MeshBasicMaterial({
+    color,
+    transparent: true,
+    opacity: FILL_OPACITY,
+    side: DoubleSide,
+    depthWrite: false,
+  });
+  build.materials.push(fillMat);
 
-  for (const layer of layers) {
-    if (visible[layer.name] === false) continue;
-    const features = layer.features.features;
-    if (features.length === 0) continue;
+  const stroke: number[] = [];
+  const fill: number[] = [];
 
-    const color = colorNum(layer.color);
-    const dotMat = new SpriteMaterial({
-      map: texture,
-      color,
-      transparent: true,
-      opacity: 0.95,
-      depthWrite: false,
-    });
-    build.materials.push(dotMat);
-    const strokeMat = new LineBasicMaterial({
-      color,
-      transparent: true,
-      opacity: STROKE_OPACITY,
-      depthWrite: false,
-    });
-    build.materials.push(strokeMat);
-    const fillMat = new MeshBasicMaterial({
-      color,
-      transparent: true,
-      opacity: FILL_OPACITY,
-      side: DoubleSide,
-      depthWrite: false,
-    });
-    build.materials.push(fillMat);
+  for (const f of features) {
+    const entry = entryFor(f);
+    if (entryIsCulled(cam, entry)) continue;
+    const far = entryIsFar(cam, entry);
+    const geometry = far ? lodGeometryFor(f) : f.geometry;
+    switch (geometry.type) {
+      case "Point": {
+        const [p] = rayPositions(viewer, cam, [geometry.coordinates], RADIUS);
+        const sprite = new Sprite(dotMat);
+        sprite.position.copy(p!);
+        sprite.scale.setScalar(DOT_SCALE);
+        build.group.add(sprite);
+        break;
+      }
+      case "LineString": {
+        const coords = geometry.coordinates;
+        const { points } = projectedPath(
+          viewer,
+          cam,
+          coords,
+          RADIUS,
+          false,
+          coords.length > SIMPLIFY_MIN_VERTICES,
+        );
+        appendStroke(stroke, points, false);
+        break;
+      }
+      case "Polygon": {
+        const rings = geometry.coordinates.map(openRing);
+        // Decimate per FEATURE: a huge polygon decimates every ring, small
+        // ones included (undecimated "small" rings of a 900-ring monster
+        // still flood the fill's hole-bridging). Far-band rings are already
+        // 3 m-coarse; the angular pass still applies when a coarse ring
+        // exceeds the floor.
+        const decimate = rings.reduce((n, r) => n + r.length, 0) > SIMPLIFY_MIN_VERTICES;
+        // One projection per vertex, shared by the boundary strokes and the
+        // fill; huge rings are angularly decimated (sub-pixel) first.
+        const paths = rings.map((r) => projectedPath(viewer, cam, r, RADIUS, true, decimate));
+        for (const { points } of paths) appendStroke(stroke, points, true);
 
-    for (const f of features) {
-      if (entryIsCulled(cam, entryFor(f))) continue;
-      switch (f.geometry.type) {
-        case "Point": {
-          const [p] = rayPositions(viewer, cam, [f.geometry.coordinates], RADIUS);
-          const sprite = new Sprite(dotMat);
-          sprite.position.copy(p);
-          sprite.scale.setScalar(DOT_SCALE);
-          build.group.add(sprite);
-          break;
-        }
-        case "LineString": {
-          makeLine(
-            build,
-            projectedPath(
-              viewer,
-              cam,
-              f.geometry.coordinates,
-              RADIUS,
-              false,
-              f.geometry.coordinates.length > SIMPLIFY_MIN_VERTICES,
-            ).points,
-            strokeMat,
-            false,
-          );
-          break;
-        }
-        case "Polygon": {
-          const rings = f.geometry.coordinates.map(openRing);
-          // Decimate per FEATURE: a huge polygon decimates every ring, small
-          // ones included (undecimated "small" rings of a 900-ring monster
-          // still flood the fill's hole-bridging).
-          const decimate =
-            rings.reduce((n, r) => n + r.length, 0) > SIMPLIFY_MIN_VERTICES;
-          // One projection per vertex, shared by the boundary strokes and the
-          // fill; huge rings are angularly decimated (sub-pixel) first.
-          const paths = rings.map((r) => projectedPath(viewer, cam, r, RADIUS, true, decimate));
-          for (const { points } of paths) {
-            makeLine(build, points, strokeMat, true);
-          }
-          // Decimated polygons: fresh per-cam triangulation of a coarser fill
-          // ring (the stroke already draws the true edge); undecimated ones
-          // keep the per-feature faces cache.
+        if (far) {
+          // Fill from the FULL coarse rings (cam-independent vertex list →
+          // faces cacheable). When angular decimation dropped stroke
+          // vertices the paths no longer address that list — reproject.
           const fillRings = decimate
-            ? rings.map((r) => projectedPath(viewer, cam, r, RADIUS, true, true, FILL_EPS_RAD).points)
+            ? rings.map((r) => rayPositions(viewer, cam, r, RADIUS))
             : paths.map((p) => p.points);
-          makeFill(build, decimate ? null : f, fillRings, fillMat);
-          break;
+          const faces = fillFacesOf(lodFillFaces, f, fillRings);
+          if (faces !== null) appendFill(fill, fillRings, faces);
+        } else if (decimate) {
+          // Ticket 11: decimated fills triangulate fresh per cam at the
+          // coarser fill ε (the stroke already draws the true edge).
+          const fillRings = rings.map(
+            (r) => projectedPath(viewer, cam, r, RADIUS, true, true, FILL_EPS_RAD).points,
+          );
+          const faces = triangulateRings(fillRings);
+          if (faces !== null) appendFill(fill, fillRings, faces);
+        } else {
+          const fillRings = paths.map((p) => p.points);
+          const faces = fillFacesOf(fillFaces, f, fillRings);
+          if (faces !== null) appendFill(fill, fillRings, faces);
         }
+        break;
       }
     }
   }
 
+  if (stroke.length > 0) {
+    const geom = new BufferGeometry();
+    build.geometries.push(geom);
+    geom.setAttribute("position", new BufferAttribute(new Float32Array(stroke), 3));
+    build.group.add(new LineSegments(geom, strokeMat));
+  }
+  if (fill.length > 0) {
+    const geom = new BufferGeometry();
+    build.geometries.push(geom);
+    geom.setAttribute("position", new BufferAttribute(new Float32Array(fill), 3));
+    build.group.add(new Mesh(geom, fillMat));
+  }
   return build;
 }
 
@@ -583,23 +640,51 @@ function inspectAt(
 
 /* ---------- component ---------- */
 
-export default function ReferenceOverlay({ viewer, cam, layers, visible, onInspect }: ReferenceOverlayProps) {
+export default function ReferenceOverlay({ viewer, cam, layers, visible, onInspect, onLayerStatus }: ReferenceOverlayProps) {
   const labelEls = useRef(new Map<string, HTMLDivElement>());
-  const labels = labeledPoints(cam, layers, visible);
+  // Memoized: a fresh array per render would re-run the labels effect (and
+  // its PSV listener subscription) on every App render.
+  const labels = useMemo(() => labeledPoints(cam, layers, visible), [cam, layers, visible]);
+  // Generation counter cancelling pending build slices (ticket 16).
+  const buildGen = useRef(0);
 
-  // Three.js scene graph: full rebuild on any prop change, full disposal on
-  // teardown / rebuild. What survives a photo switch is only the per-feature
-  // CPU-side caches above (cull entries, triangulation faces) — every
-  // GPU-backed object is recreated and disposed here.
+  // Three.js scene graph: one layer per time slice, cheapest (fewest served
+  // vertices) first — the pano is draggable from the first frame and light
+  // layers paint within milliseconds while a monster layer builds in the
+  // background (ticket 16). A prop change (pano switch, visibility toggle,
+  // layer refetch) bumps the generation: pending slices drop their work, the
+  // cleanup disposes every completed build. Hidden layers never build. What
+  // survives a switch is the per-feature CPU-side caches (cull entries, LOD
+  // geometries, fill faces) — every GPU-backed object is recreated.
   useEffect(() => {
-    const build = buildReferenceOverlay(viewer, cam, layers, visible);
-    viewer.renderer.addObject(build.group);
-    viewer.needsUpdate();
-    return () => {
-      viewer.renderer.removeObject(build.group);
-      build.dispose();
+    if (cam === null) return; // nogps / altitude-less: nothing to draw
+    const gen = ++buildGen.current;
+    const queue = buildQueue(layers, visible);
+    for (const l of queue) onLayerStatus?.(l.name, "building");
+    const done: OverlayBuild[] = [];
+    let i = 0;
+    let timer: number | undefined;
+    const step = (): void => {
+      if (buildGen.current !== gen) return; // superseded — drop the slice
+      const layer = queue[i++];
+      if (layer === undefined) return;
+      const b = buildLayerOverlay(viewer, cam, layer);
+      done.push(b);
+      viewer.renderer.addObject(b.group);
+      viewer.needsUpdate();
+      onLayerStatus?.(layer.name, "ready");
+      if (i < queue.length) timer = window.setTimeout(step, 0);
     };
-  }, [viewer, cam, layers, visible]);
+    step(); // the lightest layer builds synchronously — first paint carries it
+    return () => {
+      buildGen.current = gen + 1; // cancel pending slices
+      clearTimeout(timer);
+      for (const b of done) {
+        viewer.renderer.removeObject(b.group);
+        b.dispose();
+      }
+    };
+  }, [viewer, cam, layers, visible, onLayerStatus]);
 
   // DOM labels: React owns the elements (props), the PSV "render" event owns
   // their transforms — same per-frame projection as annotation labels.
