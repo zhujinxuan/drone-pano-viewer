@@ -41,15 +41,13 @@ import {
   CanvasTexture,
   DoubleSide,
   Group,
-  LineSegments,
   LineBasicMaterial,
+  LineSegments,
   Material,
   Mesh,
   MeshBasicMaterial,
-  ShapeUtils,
   Sprite,
   SpriteMaterial,
-  Vector2,
   Vector3,
 } from "three";
 import { makeProjector, SIMPLIFY_EPS_RAD, simplifyViewRays, vertexView, type OverlayCam, type ViewRay } from "../lib/overlay-geometry";
@@ -63,6 +61,7 @@ import {
 import { cullEntry, entryIsCulled, entryIsFar, type CullEntry } from "../lib/reference-cull";
 import { lodGeometry } from "../lib/reference-lod";
 import { buildQueue } from "../lib/reference-build";
+import { triangulateRings } from "../lib/reference-fill";
 import type { RefFeature, RefGeometry, RefLayerPayload, RefPosition } from "../lib/reference-layers";
 import "./ReferenceOverlay.css";
 
@@ -134,9 +133,12 @@ const CLICK_SLOP_PX = 6;
  *    dense avoidance polygons — ~160 k geodesic calls per keypress).
  *  - fillFaces: earcut face indices of a Polygon fill. The indices address
  *    the flattened ring vertex list, whose composition is cam-independent;
- *    between switches only the vertex POSITIONS change (near-affine
- *    tangent-plane reprojection keeps a valid triangulation valid — fills
- *    are 15%-opacity decoration, sliver-level deviations are invisible).
+ *    between switches only the vertex POSITIONS change, and the
+ *    stereographic fill projection (lib/reference-fill) is injective over
+ *    every ground ray for any camera, so ring topology — hence the
+ *    triangulation — is preserved exactly: cached faces stay valid under
+ *    any camera (ticket 11's tangent-plane fills were only approximately
+ *    valid and leaked near-camera holes).
  */
 
 const cullEntries = new WeakMap<RefFeature, CullEntry>();
@@ -355,39 +357,6 @@ function appendStroke(out: number[], points: Vector3[], closed: boolean): void {
     const b = points[0]!;
     out.push(a.x, a.y, a.z, b.x, b.y, b.z);
   }
-}
-
-/**
- * Earcut face indices of a polygon's rings: project every ring onto one
- * tangent plane (basis from all rings' points — a shared frame keeps
- * exterior and holes coherent), then ShapeUtils with the interior rings as
- * holes. Returns null when there is nothing to fill (degenerate contour or
- * empty triangulation). The result is cached per feature (fillFaces): the
- * indices address the flattened ring vertex list, which is cam-independent.
- */
-function triangulateRings(rings: Vector3[][]): readonly number[][] | null {
-  const contour = rings[0];
-  if (contour === undefined || contour.length < 3) return null;
-  const holes = rings.slice(1).filter((r) => r.length >= 3);
-  const all = [contour, ...holes];
-
-  const center = new Vector3();
-  let count = 0;
-  for (const r of all) {
-    for (const p of r) {
-      center.add(p);
-      count++;
-    }
-  }
-  center.divideScalar(count);
-  const normal = center.clone().normalize();
-  const ref = Math.abs(normal.y) < 0.9 ? new Vector3(0, 1, 0) : new Vector3(1, 0, 0);
-  const e1 = new Vector3().crossVectors(ref, normal).normalize();
-  const e2 = new Vector3().crossVectors(normal, e1);
-
-  const to2D = (r: Vector3[]): Vector2[] => r.map((p) => new Vector2(p.dot(e1), p.dot(e2)));
-  const faces = ShapeUtils.triangulateShape(to2D(contour), holes.map(to2D));
-  return faces.length === 0 ? null : faces;
 }
 
 /**

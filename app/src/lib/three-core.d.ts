@@ -1,6 +1,6 @@
 /**
- * Minimal ambient declarations for the slice of three (r185) used by
- * `components/AnnotationOverlay.tsx`.
+ * Minimal ambient declarations for the slice of three (r185) used by the
+ * overlay components and `lib/reference-fill.ts`.
  *
  * Why this exists: `three` is installed only as a transitive dependency of
  * `@photo-sphere-viewer/core` and ships no TypeScript types; `@types/three`
@@ -30,8 +30,12 @@ declare module "three" {
     normalize(): this;
     dot(v: Vector3): number;
     add(v: Vector3): this;
+    sub(v: Vector3): this;
+    subVectors(a: Vector3, b: Vector3): this;
+    multiplyScalar(scalar: number): this;
     divideScalar(scalar: number): this;
     crossVectors(a: Vector3, b: Vector3): this;
+    length(): number;
     setScalar(scalar: number): this;
   }
 
