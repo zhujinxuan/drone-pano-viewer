@@ -24,6 +24,7 @@ import type { RefLayerPayload } from "./lib/reference-layers";
 import { seedVisibility } from "./lib/reference-build";
 import type { InspectHit } from "./lib/reference-inspect";
 import { formatMeasureChip, measureBetween, type MeasurePoint } from "./lib/measure";
+import { loadOverlayOpacity, saveOverlayOpacity, stepMultiplier } from "./lib/overlay-opacity";
 import MeasureOverlay from "./components/MeasureOverlay";
 import ReferenceOverlay from "./components/ReferenceOverlay";
 import LayerToolbar, { InspectReadout } from "./components/LayerToolbar";
@@ -34,6 +35,9 @@ import AnnotationPanel from "./components/AnnotationPanel";
 
 const DEG = 180 / Math.PI;
 const FLASH_MS = 1250;
+/** Opacity chip: hold ~1 s after the last Alt+wheel notch, then fade
+ * (0.3 s CSS animation; the timer unmounts at its end). */
+const OPACITY_CHIP_MS = 1300;
 /** Stable empty array — a fresh `?? []` per render would restart the overlay's effects. */
 const EMPTY_LAYERS: RefLayerPayload[] = [];
 
@@ -87,6 +91,18 @@ export default function App() {
   // The viewer effect must read the offset without re-creating the viewer.
   const northOffsetRef = useRef(northOffset);
   const [flash, setFlash] = useState<{ n: number; text: string } | null>(null);
+  // --- Overlay opacity (.scratch/overlay-opacity/spec.md) ---
+  // Global multiplier on the reference-layer + annotation material alphas
+  // (10%–300%, default 100%), Alt+scroll anywhere on the viewer. Persisted
+  // in the change handler itself (same discipline as changeNorthOffset).
+  const [overlayOpacity, setOverlayOpacity] = useState<number>(loadOverlayOpacity);
+  // The wheel listener reads this without re-subscribing per notch.
+  const overlayOpacityRef = useRef(overlayOpacity);
+  // Transient `Overlay N%` chip: n bumps per notch (remount restarts the
+  // fade animation), cleared ~1.3 s after the LAST notch.
+  const [opacityChip, setOpacityChip] = useState<{ n: number; multiplier: number } | null>(null);
+  const opacityChipSeq = useRef(0);
+  const opacityChipTimer = useRef<number | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const viewerRef = useRef<Viewer | null>(null);
   const zoomRef = useRef<number | null>(null);
@@ -707,10 +723,30 @@ export default function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [navigate, mode, measureOn, measureA, draftVerts.length, selectedId, current, finishDraft, undoVertex, clearDraft, clearMeasure, deleteEntityById, inspect]);
-
   useEffect(() => {
     const container = containerRef.current;
     if (!container || panoramaUrl === null) return;
+
+    // Alt+wheel = overlay opacity (overlay-opacity spec §Gesture). PSV owns
+    // plain wheel (FOV zoom); this capture listener on the SAME container
+    // is registered BEFORE the Viewer because at-target listeners fire in
+    // registration order — the capture flag alone would not win. Alt held →
+    // swallow the notch here (immediate stop: PSV never zooms); no Alt →
+    // fall through untouched, byte-identical FOV zoom.
+    const onWheel = (ev: WheelEvent): void => {
+      if (!ev.altKey || ev.deltaY === 0) return;
+      ev.preventDefault();
+      ev.stopImmediatePropagation();
+      const next = stepMultiplier(overlayOpacityRef.current, ev.deltaY < 0 ? 1 : -1);
+      overlayOpacityRef.current = next;
+      setOverlayOpacity(next);
+      saveOverlayOpacity(next);
+      opacityChipSeq.current += 1;
+      setOpacityChip({ n: opacityChipSeq.current, multiplier: next });
+      if (opacityChipTimer.current !== null) window.clearTimeout(opacityChipTimer.current);
+      opacityChipTimer.current = window.setTimeout(() => setOpacityChip(null), OPACITY_CHIP_MS);
+    };
+    container.addEventListener("wheel", onWheel, { capture: true, passive: false });
 
     const viewer = new Viewer({
       container,
@@ -779,6 +815,7 @@ export default function App() {
 
     return () => {
       window.clearInterval(timer);
+      container.removeEventListener("wheel", onWheel, { capture: true });
       container.removeEventListener("mousedown", onDown);
       viewerRef.current = null;
       setViewerObj(null);
@@ -822,6 +859,11 @@ export default function App() {
             </span>
           )}
         </div>
+        {opacityChip !== null && (
+          <div key={opacityChip.n} className="opacity-chip" aria-live="polite">
+            Overlay {Math.round(opacityChip.multiplier * 100)}%
+          </div>
+        )}
         {panoramaUrl !== null && (
           <MetadataPanel
             imageUrl={panoramaUrl}
@@ -849,6 +891,7 @@ export default function App() {
                 : null
             }
             selectedId={selectedId}
+            opacityMultiplier={overlayOpacity}
           />
         )}
         {viewerObj !== null && (
@@ -859,6 +902,7 @@ export default function App() {
             visible={layerVisible}
             onInspect={onRefInspect}
             onLayerStatus={onLayerStatus}
+            opacityMultiplier={overlayOpacity}
           />
         )}
         {refLayers !== null && refLayers.length > 0 && (

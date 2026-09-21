@@ -64,6 +64,7 @@ import { cullEntry, entryIsCulled, entryIsFar, type CullEntry } from "../lib/ref
 import { lodGeometry } from "../lib/reference-lod";
 import { buildQueue } from "../lib/reference-build";
 import type { RefFeature, RefGeometry, RefLayerPayload, RefPosition } from "../lib/reference-layers";
+import { effectiveAlpha } from "../lib/overlay-opacity";
 import "./ReferenceOverlay.css";
 
 export interface ReferenceOverlayProps {
@@ -90,6 +91,13 @@ export interface ReferenceOverlayProps {
    * it is an effect dep, so App must memoize it.
    */
   onLayerStatus?: (name: string, status: "building" | "ready") => void;
+  /**
+   * Global overlay opacity multiplier (`pano.overlayOpacity`, overlay-opacity
+   * spec): all three shared materials scale by it (effective = base ×
+   * multiplier, ≤ 1). Applied live, in place — a multiplier change must NOT
+   * re-run this component's (expensive, ticket-16-async) build effect.
+   */
+  opacityMultiplier: number;
 }
 
 /** One DOM-labeled point feature (culled features never get here). */
@@ -109,8 +117,20 @@ const RADIUS = CONSTANTS.SPHERE_RADIUS - 0.08;
 const STROKE_OPACITY = 0.8;
 /** Spec: translucent polygon fill ~15% opacity. */
 const FILL_OPACITY = 0.15;
+/** Point dot sprite strength (annotation point scale). */
+const DOT_OPACITY = 0.95;
 /** Point dot sprite size (annotation point scale). */
 const DOT_SCALE = 0.13;
+
+/**
+ * Tag a shared material with its base alpha and apply the live multiplier
+ * (effective = base × multiplier, ≤ 1). The base tag is what lets the
+ * in-place opacity effect re-scale later without a rebuild.
+ */
+function scaleMaterial(m: Material, base: number, multiplier: number): void {
+  m.userData.baseOpacity = base;
+  m.opacity = effectiveAlpha(base, multiplier);
+}
 /** Default point-label property precedence (spec §CLI contract). */
 const LABEL_KEYS = ["label", "name", "id", "turbine"] as const;
 /** Click-inspect hit radius: generous for dots, tight enough to feel
@@ -443,6 +463,7 @@ function buildLayerOverlay(
   viewer: Viewer,
   cam: OverlayCam,
   layer: RefLayerPayload,
+  opacityMultiplier: number,
 ): OverlayBuild {
   const build = new OverlayBuild();
   const features = layer.features.features;
@@ -455,24 +476,24 @@ function buildLayerOverlay(
     map: texture,
     color,
     transparent: true,
-    opacity: 0.95,
     depthWrite: false,
   });
+  scaleMaterial(dotMat, DOT_OPACITY, opacityMultiplier);
   build.materials.push(dotMat);
   const strokeMat = new LineBasicMaterial({
     color,
     transparent: true,
-    opacity: STROKE_OPACITY,
     depthWrite: false,
   });
+  scaleMaterial(strokeMat, STROKE_OPACITY, opacityMultiplier);
   build.materials.push(strokeMat);
   const fillMat = new MeshBasicMaterial({
     color,
     transparent: true,
-    opacity: FILL_OPACITY,
     side: DoubleSide,
     depthWrite: false,
   });
+  scaleMaterial(fillMat, FILL_OPACITY, opacityMultiplier);
   build.materials.push(fillMat);
 
   const stroke: number[] = [];
@@ -640,13 +661,22 @@ function inspectAt(
 
 /* ---------- component ---------- */
 
-export default function ReferenceOverlay({ viewer, cam, layers, visible, onInspect, onLayerStatus }: ReferenceOverlayProps) {
+export default function ReferenceOverlay({ viewer, cam, layers, visible, onInspect, onLayerStatus, opacityMultiplier }: ReferenceOverlayProps) {
   const labelEls = useRef(new Map<string, HTMLDivElement>());
   // Memoized: a fresh array per render would re-run the labels effect (and
   // its PSV listener subscription) on every App render.
   const labels = useMemo(() => labeledPoints(cam, layers, visible), [cam, layers, visible]);
   // Generation counter cancelling pending build slices (ticket 16).
   const buildGen = useRef(0);
+  // Live multiplier mirror: async build slices read it at material-creation
+  // time, so a notch landing between slices needs no build-effect rerun.
+  const multiplierRef = useRef(opacityMultiplier);
+  multiplierRef.current = opacityMultiplier;
+  // The CURRENT generation's completed builds — what the in-place opacity
+  // effect patches. Points at the build effect's growing `done` array; the
+  // build effect empties it on cleanup so disposed materials are never
+  // touched.
+  const liveBuilds = useRef<OverlayBuild[]>([]);
 
   // Three.js scene graph: one layer per time slice, cheapest (fewest served
   // vertices) first — the pano is draggable from the first frame and light
@@ -655,20 +685,26 @@ export default function ReferenceOverlay({ viewer, cam, layers, visible, onInspe
   // layer refetch) bumps the generation: pending slices drop their work, the
   // cleanup disposes every completed build. Hidden layers never build. What
   // survives a switch is the per-feature CPU-side caches (cull entries, LOD
-  // geometries, fill faces) — every GPU-backed object is recreated.
+  // geometries, fill faces) — every GPU-backed object is recreated. The
+  // opacity multiplier is deliberately NOT a dep: notches patch materials in
+  // place (see the effect below) instead of re-costing cull/decimate/build.
   useEffect(() => {
-    if (cam === null) return; // nogps / altitude-less: nothing to draw
+    if (cam === null) {
+      liveBuilds.current = [];
+      return; // nogps / altitude-less: nothing to draw
+    }
     const gen = ++buildGen.current;
     const queue = buildQueue(layers, visible);
     for (const l of queue) onLayerStatus?.(l.name, "building");
     const done: OverlayBuild[] = [];
+    liveBuilds.current = done;
     let i = 0;
     let timer: number | undefined;
     const step = (): void => {
       if (buildGen.current !== gen) return; // superseded — drop the slice
       const layer = queue[i++];
       if (layer === undefined) return;
-      const b = buildLayerOverlay(viewer, cam, layer);
+      const b = buildLayerOverlay(viewer, cam, layer, multiplierRef.current);
       done.push(b);
       viewer.renderer.addObject(b.group);
       viewer.needsUpdate();
@@ -679,12 +715,26 @@ export default function ReferenceOverlay({ viewer, cam, layers, visible, onInspe
     return () => {
       buildGen.current = gen + 1; // cancel pending slices
       clearTimeout(timer);
+      liveBuilds.current = [];
       for (const b of done) {
         viewer.renderer.removeObject(b.group);
         b.dispose();
       }
     };
   }, [viewer, cam, layers, visible, onLayerStatus]);
+
+  // Opacity multiplier change → patch every live material from its base tag,
+  // in place, no rebuild (overlay-opacity spec §Application). Materials
+  // created by slices still pending read the ref, so they land consistent.
+  useEffect(() => {
+    for (const b of liveBuilds.current) {
+      for (const m of b.materials) {
+        const base = m.userData.baseOpacity;
+        if (typeof base === "number") m.opacity = effectiveAlpha(base, opacityMultiplier);
+      }
+    }
+    viewer.needsUpdate();
+  }, [viewer, opacityMultiplier]);
 
   // DOM labels: React owns the elements (props), the PSV "render" event owns
   // their transforms — same per-frame projection as annotation labels.

@@ -69,6 +69,10 @@ declare module "three" {
   }
 
   export abstract class Material {
+    /** Blend alpha; real three mutates this live (overlay-opacity ticket). */
+    opacity: number;
+    /** Free-form per-material metadata (real three defaults it to {}). */
+    userData: Record<string, unknown>;
     dispose(): void;
   }
 
