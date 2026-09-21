@@ -25,6 +25,8 @@ import { seedVisibility } from "./lib/reference-build";
 import type { InspectHit } from "./lib/reference-inspect";
 import { formatMeasureChip, measureBetween, type MeasurePoint } from "./lib/measure";
 import MeasureOverlay from "./components/MeasureOverlay";
+import { formatHeightChip, heightBetween, type HeightPoint } from "./lib/height";
+import HeightOverlay from "./components/HeightOverlay";
 import ReferenceOverlay from "./components/ReferenceOverlay";
 import LayerToolbar, { InspectReadout } from "./components/LayerToolbar";
 import MetadataPanel from "./components/MetadataPanel";
@@ -120,6 +122,15 @@ export default function App() {
   const [measureA, setMeasureA] = useState<MeasurePoint | null>(null);
   const [measureB, setMeasureB] = useState<MeasurePoint | null>(null);
 
+  // --- Height mode (.scratch/vertical-measure/spec.md) --- Ephemeral
+  // vertical (tree-height) measurement on the same seams as measure. A is
+  // a captured ground target (tree base, flat-ground capture); B is
+  // pitch-only (tree top, any pitch — bearing ignored); cleared by pano
+  // switch / Esc / mode exit. Never persisted.
+  const [heightOn, setHeightOn] = useState(false);
+  const [heightA, setHeightA] = useState<HeightPoint | null>(null);
+  const [heightB, setHeightB] = useState<number | null>(null);
+
   // Metadata failure surface (metadata-panel/01): null while parsing or on
   // success; the panel's error message when the current photo has no usable
   // metadata. Drives the degrade banner — the photo still renders, but the
@@ -208,6 +219,15 @@ export default function App() {
   const measureReadout =
     measureA !== null && measureEnd !== null ? measureBetween(measureA, measureEnd) : null;
 
+  // Height mode: the vertical line's top sits at B's pitch once fixed,
+  // else at the live reticle pitch (the rubber band tracks it); the
+  // readout turns null while H ≤ 0 (chip hides, line keeps tracking).
+  // Readout math in lib/height (Vincenty d + tangential quadrature err).
+  const heightReadout =
+    heightA !== null && groundCam !== null
+      ? heightBetween(groundCam, heightA, heightB ?? hud.pitch * DEG)
+      : null;
+
   // Each pano carries its own EXIF capture time and XMP altitude. A switch
   // also discards the in-progress shape (spec §Small print), the measure
   // endpoints, and the selection (entities are per-photo).
@@ -223,6 +243,8 @@ export default function App() {
     setDeleted(null);
     setMeasureA(null);
     setMeasureB(null);
+    setHeightA(null);
+    setHeightB(null);
     // The inspected feature may be culled/hidden in the next pano's view.
     setInspect(null);
   }, [panoramaUrl]);
@@ -498,6 +520,33 @@ export default function App() {
     },
     [measureOn, groundCam, measureA, measureB, flashReject],
   );
+
+  /**
+   * Height capture (vertical-measure ticket 01): A is the standard
+   * flat-ground capture (same seam, same horizon reject flash); B is free
+   * — any pitch, bearing ignored (the user aligns the tree visually). B
+   * with H ≤ 0 rejects (its ray hits ground nearer than A); a third
+   * capture restarts at A, like measure.
+   */
+  const heightAdd = useCallback(
+    (yawDeg: number, pitchDeg: number) => {
+      if (!heightOn || groundCam === null) return;
+      if (heightA === null || heightB !== null) {
+        const t = groundTarget(groundCam, yawDeg, pitchDeg);
+        if (t === null) {
+          flashReject();
+          return;
+        }
+        setHeightA(t);
+        setHeightB(null);
+      } else if (heightBetween(groundCam, heightA, pitchDeg) === null) {
+        flashReject();
+      } else {
+        setHeightB(pitchDeg);
+      }
+    },
+    [heightOn, groundCam, heightA, heightB, flashReject],
+  );
   // The viewer's click listener (created per pano) and the Space key call
   // through this ref — it dispatches to whichever capture mode is active.
   const aimCaptureRef = useRef(addVertex);
@@ -507,7 +556,9 @@ export default function App() {
         ? addVertex
         : measureOn
           ? measureAdd
-          : () => {};
+          : heightOn
+            ? heightAdd
+            : () => {};
   });
 
   const clearDraft = useCallback(() => {
@@ -520,8 +571,13 @@ export default function App() {
     setMeasureB(null);
   }, []);
 
-  /** Rail pick: annotation modes and measure are exclusive — entering one
-   *  exits (and clears) the other's in-progress state. */
+  const clearHeight = useCallback(() => {
+    setHeightA(null);
+    setHeightB(null);
+  }, []);
+
+  /** Rail pick: annotation modes, measure and height are exclusive —
+   *  entering one exits (and clears) the others' in-progress state. */
   const changeMode = useCallback(
     (m: AnnKind | null) => {
       setMode(m);
@@ -529,21 +585,38 @@ export default function App() {
       if (m !== null) {
         setMeasureOn(false);
         clearMeasure();
+        setHeightOn(false);
+        clearHeight();
         setInspect(null);
       }
     },
-    [clearDraft, clearMeasure],
+    [clearDraft, clearMeasure, clearHeight],
   );
 
   /** Measure rail button: toggle measure, always leaving annotation mode
-   *  and dropping any draft/measurement (exit clears all, spec §Measure). */
+   *  and height, dropping any draft/measurement (exit clears all). */
   const toggleMeasure = useCallback(() => {
     setMeasureOn((on) => !on);
     setMode(null);
     clearDraft();
     clearMeasure();
+    setHeightOn(false);
+    clearHeight();
     setInspect(null);
-  }, [clearDraft, clearMeasure]);
+  }, [clearDraft, clearMeasure, clearHeight]);
+
+  /** Height rail button: toggle height mode, always leaving the annotation
+   *  modes and measure, dropping any draft/measurement/A/B (exit clears
+   *  all — the vertical measurement is ephemeral, nothing persists). */
+  const toggleHeight = useCallback(() => {
+    setHeightOn((on) => !on);
+    setMode(null);
+    clearDraft();
+    setMeasureOn(false);
+    clearMeasure();
+    clearHeight();
+    setInspect(null);
+  }, [clearDraft, clearMeasure, clearHeight]);
 
   // --- Reference-layer toolbar + click-inspect (ticket 04) ---
 
@@ -559,7 +632,7 @@ export default function App() {
   // Reference clicks may inspect ONLY in idle mode — never steal from
   // annotation vertex capture or measure capture (the overlay unmounts its
   // click listener entirely while this is null).
-  const onRefInspect = mode === null && !measureOn ? handleInspect : null;
+  const onRefInspect = mode === null && !measureOn && !heightOn ? handleInspect : null;
 
   /** Enter: finish at ≥ min vertices → entity + label input; else cancel. */
   const finishDraft = useCallback(() => {
@@ -673,7 +746,7 @@ export default function App() {
       } else if (e.key === "[" || e.key === "p") {
         e.preventDefault();
         navigate(-1);
-      } else if (e.key === " " && (mode !== null || measureOn)) {
+      } else if (e.key === " " && (mode !== null || measureOn || heightOn)) {
         e.preventDefault();
         aimCaptureRef.current(hudRef.current.yaw * DEG, hudRef.current.pitch * DEG);
       } else if (e.key === "Enter" && (mode === "line" || mode === "polygon")) {
@@ -685,8 +758,10 @@ export default function App() {
       } else if (e.key === "Escape") {
         if (draftVerts.length > 0) clearDraft();
         else if (measureA !== null) clearMeasure();
+        else if (heightA !== null) clearHeight();
         else if (mode !== null) setMode(null);
         else if (measureOn) setMeasureOn(false);
+        else if (heightOn) setHeightOn(false);
         else if (inspect !== null) setInspect(null);
       } else if ((e.key === "Delete" || e.key === "d") && selectedId !== null) {
         e.preventDefault();
@@ -706,7 +781,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [navigate, mode, measureOn, measureA, draftVerts.length, selectedId, current, finishDraft, undoVertex, clearDraft, clearMeasure, deleteEntityById, inspect]);
+  }, [navigate, mode, measureOn, measureA, heightOn, heightA, draftVerts.length, selectedId, current, finishDraft, undoVertex, clearDraft, clearMeasure, clearHeight, deleteEntityById, inspect]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -879,6 +954,15 @@ export default function App() {
             chipText={measureReadout === null ? null : formatMeasureChip(measureReadout)}
           />
         )}
+        {viewerObj !== null && current !== null && heightOn && (
+          <HeightOverlay
+            viewer={viewerObj}
+            cam={groundCam}
+            a={heightA}
+            pitchTopDeg={heightA === null ? null : (heightB ?? hud.pitch * DEG)}
+            chipText={heightReadout === null ? null : formatHeightChip(heightReadout)}
+          />
+        )}
         {photos !== null && (
           <AnnotationPanel
             features={currentFeatures}
@@ -888,6 +972,8 @@ export default function App() {
             measureActive={measureOn}
             onMeasureToggle={toggleMeasure}
             canMeasure={canMeasure}
+            heightActive={heightOn}
+            onHeightToggle={toggleHeight}
             inProgress={
               mode === "line" || mode === "polygon"
                 ? { kind: mode, vertexCount: draftVerts.length }

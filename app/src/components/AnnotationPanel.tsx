@@ -11,9 +11,10 @@ import { featureVertices } from "../lib/annotations";
  * Renders:
  *  1. Top-left rail (always visible): Point / Line / Polygon mode buttons
  *     with active-state styling, a fourth `measure` button (reference-layers
- *     ticket 05 — exclusive with the draw modes, wired through to App like
- *     the others), a `?` chip unfolding a shortcuts dropdown
- *     (help only — no rebinding), and a list-toggle chip.
+ *     ticket 05) and a fifth `height` button (vertical-measure ticket 01) —
+ *     each exclusive with the others, wired through to App like the rest —
+ *     a `?` chip unfolding a shortcuts dropdown (help only — no rebinding),
+ *     and a list-toggle chip.
  *  2. Entity list panel (`e` toggles): the current photo's entities grouped
  *     Point/Line/Polygon in file order; each row = label (click → select +
  *     camera swing, double-click → rename), a look-at affordance, inline
@@ -42,9 +43,13 @@ import { featureVertices } from "../lib/annotations";
  *   measureActive       measure mode on (ticket 05; exclusive with `mode`)
  *   onMeasureToggle     measure rail button click — App enters/exits measure,
  *                       leaving the annotation modes
- *   canMeasure          false greys the measure button (no position/
- *                       altitude — needs no annotations outbox: a
- *                       measurement is never persisted)
+ *   canMeasure          false greys the measure AND height buttons (no
+ *                       position/altitude — needs no annotations outbox:
+ *                       a measurement is never persisted)
+ *   heightActive        height mode on (ticket 01; exclusive with `mode`
+ *                       and measure)
+ *   onHeightToggle      height rail button click — App enters/exits height,
+ *                       leaving the annotation modes and measure
  *   inProgress          non-null shows the hint bar; vertexCount drives the
  *                       `N verts` readout and the ✓/undo disabled states
  *   onFinish            ✓ button (enabled only at line ≥ 2 / polygon ≥ 3)
@@ -87,6 +92,10 @@ export interface AnnotationPanelProps {
   measureActive: boolean;
   /** Enter/exit measure mode; exclusive with the draw modes. */
   onMeasureToggle: () => void;
+  /** Height mode (vertical-measure ticket 01): rail button state. */
+  heightActive: boolean;
+  /** Enter/exit height mode; exclusive with the draw modes and measure. */
+  onHeightToggle: () => void;
   /** Position + altitude available (nogps / missing RelativeAltitude). */
   canMeasure: boolean;
   inProgress: AnnotationHint | null;
@@ -253,6 +262,8 @@ export default function AnnotationPanel({
   onPendingLabelDone,
   measureActive,
   onMeasureToggle,
+  heightActive,
+  onHeightToggle,
   canMeasure,
   open,
   onOpenChange,
@@ -396,6 +407,40 @@ export default function AnnotationPanel({
             />
             <circle cx="3.2" cy="12.8" r="1.7" fill="currentColor" />
             <circle cx="12.8" cy="3.2" r="1.7" fill="currentColor" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          className={`ann-pnl-mbtn${heightActive ? " ann-pnl-on" : ""}`}
+          disabled={!canMeasure}
+          aria-pressed={heightActive}
+          title={
+            canMeasure
+              ? "Height mode — click again (or Esc) to exit"
+              : "no position/altitude — height measurement unavailable"
+          }
+          onClick={onHeightToggle}
+        >
+          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+            <line
+              x1="8"
+              y1="13.2"
+              x2="8"
+              y2="3.6"
+              stroke="currentColor"
+              strokeWidth="1.4"
+              strokeDasharray="2.4 2"
+              strokeLinecap="round"
+            />
+            <circle cx="8" cy="13.2" r="1.7" fill="currentColor" />
+            <path
+              d="M6.3 5.4 8 3.4 9.7 5.4"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.3"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
           </svg>
         </button>
         <div className="ann-pnl-rail-sep" />

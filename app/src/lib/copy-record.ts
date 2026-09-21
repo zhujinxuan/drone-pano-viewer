@@ -39,7 +39,7 @@ export function positionSigmaM(fix: CameraFix): number {
 }
 
 /** Error-model assumptions, also stated in the HUD tooltip. */
-const PITCH_ERR_RAD = (0.1 * Math.PI) / 180; // aim/readout
+export const PITCH_ERR_RAD = (0.1 * Math.PI) / 180; // aim/readout
 const TERRAIN_ERR_M = 1; // flat-ground assumption vs real relief
 
 /**

@@ -1,0 +1,37 @@
+/* Height overlay (vertical-measure ticket 01) — readout chip projected at
+   the top of the vertical line. Same contract as the measure chip:
+   pointer-events none (clicks pass through to PSV), dark chip with
+   #e6e6ea monospace text; the left border echoes the 3D line color so
+   DOM and scene agree. */
+
+.height-overlay {
+  position: absolute;
+  inset: 0;
+  /* Above the pano canvas, below HUD/panels (same layer as annotations). */
+  z-index: 5;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.height-chip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  /* Off-stage until the first projection writes a real transform. */
+  transform: translate(-100px, -100px);
+  padding: 2px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-left: 3px solid #ffa657;
+  border-radius: 4px;
+  background: rgba(10, 10, 14, 0.72);
+  color: #e6e6ea;
+  font-family: ui-monospace, Consolas, "Cascadia Mono", monospace;
+  font-size: 11.5px;
+  line-height: 1.4;
+  white-space: nowrap;
+  text-shadow: 0 1px 2px #000;
+}
+
+.height-chip.is-hidden {
+  visibility: hidden;
+}
