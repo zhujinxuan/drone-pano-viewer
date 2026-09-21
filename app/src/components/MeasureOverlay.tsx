@@ -51,11 +51,12 @@ const RADIUS = CONSTANTS.SPHERE_RADIUS - 0.08;
 /** Endpoint ring sprite size on the RADIUS=9.92 sphere. */
 const RING_SCALE = 0.14;
 /**
- * Hollow white ring with a dark rim: a captured measure endpoint. Rings,
- * not the annotation dot — the two overlays must stay readable when both
- * are on screen.
+ * Hollow white ring with a dark rim: a captured endpoint marker. Shared
+ * with `HeightOverlay`'s tree-base ring — rings, not the annotation dot,
+ * so the overlays stay readable when both are on screen. The texture is
+ * color-neutral; each overlay's sprite material tints it.
  */
-function makeRingTexture(): CanvasTexture {
+export function makeRingTexture(): CanvasTexture {
   const canvas = document.createElement("canvas");
   canvas.width = canvas.height = 64;
   const ctx = canvas.getContext("2d");

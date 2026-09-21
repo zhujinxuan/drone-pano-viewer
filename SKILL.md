@@ -131,8 +131,21 @@ Ephemeral two-point ground distance/bearing on the current pano — **nothing pe
 - **Mode rail** (top left): fourth button after `point` / `line` / `polygon`, exclusive with them — entering measure exits (and clears) any annotation draft; clicking the button again or `Esc` exits and clears the measurement.
 - **Capture**: `Space` at the reticle or a click (drag-guarded) sets A — same flat-ground capture as annotation vertices, same reject flash at/above the horizon. While B is unset, the dashed rubber band + chip track the live reticle aim; the second click sets B; a third click starts a new A (the finished measurement is discarded).
 - **Readout chip** (projected at the measured end point): `<dist> · <bearing>° · ±<err>` — distance with the HUD `dist` formatting (10 m rounding, `> 5 km` cap), forward bearing A→B clockwise from true north at 1 dp, and ±err = the two endpoints' differential errors (pitch sensitivity + terrain) combined in quadrature; the camera-position σ is common-mode and cancels.
-- **Esc chain**: in-progress annotation shape → current measurement (stays in mode) → annotation mode → measure mode → inspect readout.
+- **Esc chain**: in-progress annotation shape → current measurement (stays in mode) → annotation mode → measure mode → height mode → inspect readout.
 - **Disabled** on `nogps-*` or missing-RelativeAltitude photos (button greyed out), like annotation modes; switching panos clears A/B.
+
+## Height mode
+
+Ephemeral vertical measurement (tree height) on the current pano — **nothing persisted**, same as measure mode. A = tree base captured on the ground (standard flat-ground capture); B = tree top captured as a **pitch only** — any pitch is accepted, bearing is ignored (the user aligns the tree visually; a tree shorter than the drone's altitude legitimately sits below the horizon). Needs a camera position + RelativeAltitude but no outbox.
+
+**UI contract**:
+
+- **Mode rail** (top left): fifth button after `measure`, exclusive with all four others — entering height exits (and clears) any annotation draft and measure A/B; clicking the button again or `Esc` exits and clears.
+- **Capture A**: `Space` at the reticle or a drag-guarded click — the standard flat-ground capture, same horizon reject flash as annotation/measure.
+- **Capture B**: `Space`/click at any pitch. `H = relAlt + d·tan(pitch_B)`, `d` = horizontal distance cam→A (Vincenty); `H ≤ 0` — B's ray hits the ground nearer than A — rejects with the red flash, never silently. While B is unset, a dashed vertical rubber band at A tracks the live reticle pitch (the height live-updates); the second capture fixes B; a third starts a new A.
+- **Readout chip** (projected at the top of the vertical line): `H 23.5 m · d 180 m · ±2 m` — H at 0.1 m, `d` with the HUD `dist` formatting (10 m rounding, `> 5 km` cap), ±err = `√((d·sec²(pitch_B)·σ_pitch)² + (tan(pitch_B)·σ_d)²)` with the copy-record 0.1° aim σ and A's differential σ_d (camera-position σ is common-mode and cancels).
+- **Esc** while A/B are set clears them and stays in height mode (the chain above then walks out).
+- **Disabled** on `nogps-*` or missing-RelativeAltitude photos (button greyed out), like measure; switching panos clears A/B.
 
 ## Caveats
 

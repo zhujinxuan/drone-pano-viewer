@@ -21,5 +21,6 @@ Glossary for the local drone-panorama viewer. Use these terms verbatim in issues
 | **in-progress shape** | A line/polygon being drawn — vertices captured but not yet finished with Enter. Discarded on photo switch; never written to the annotations file. |
 | **reference layer** | An external, read-only, file-backed GeoJSON overlay (turbine foundations, avoidance areas…) passed via repeatable `--layer` flags. Produced and edited by outside tools; file changes reach the viewer by watch. The viewer never writes it. |
 | **measure** | An ephemeral two-point ground distance/bearing readout on the current pano. Never persisted — a measurement is not an annotation. |
+| **height** | An ephemeral vertical (tree-height) measurement on the current pano: **A** = tree base on the ground (flat-ground capture), **B** = tree-top pitch (any pitch, bearing ignored), `H = relAlt + d·tan(pitch_B)`. Never persisted, like **measure**. |
 
 Design decisions: see `docs/adr/0001-architecture.md`, `docs/adr/0002-annotations-outbound.md`, and `docs/adr/0003-reference-layers.md`.
