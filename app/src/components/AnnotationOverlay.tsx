@@ -86,6 +86,7 @@ import {
   Vector3,
 } from "three";
 import { vertexView, verticesCentroid, type OverlayCam } from "../lib/overlay-geometry";
+import { effectiveAlpha } from "../lib/overlay-opacity";
 import "./AnnotationOverlay.css";
 
 /* ---------- public prop types (ticket 07 consumes these) ---------- */
@@ -121,6 +122,13 @@ export interface AnnotationOverlayProps {
   features: OverlayFeature[];
   inProgress: InProgressShape | null;
   selectedId: string | null;
+  /**
+   * Global overlay opacity multiplier (`pano.overlayOpacity`): scales the
+   * finished features' strokes / fills / point dots (effective = base ×
+   * multiplier, ≤ 1). In-progress sketch and selection affordances stay at
+   * base alpha — never dimmed below usability (overlay-opacity spec §Scope).
+   */
+  opacityMultiplier: number;
   onLabelPositions?: (positions: LabelPosition[]) => void;
 }
 
@@ -288,9 +296,15 @@ function buildOverlay(
   features: OverlayFeature[],
   inProgress: InProgressShape | null,
   selectedId: string | null,
+  opacityMultiplier: number,
 ): OverlayBuild {
   const build = new OverlayBuild();
   if (cam === null) return build;
+
+  // Finished-feature alphas scale with the global multiplier; the sketch /
+  // halo / vertex-marker materials below deliberately do NOT (spec §Scope:
+  // in-progress and selection affordances are never dimmed below usability).
+  const alpha = (base: number): number => effectiveAlpha(base, opacityMultiplier);
 
   const texture = makeDotTexture();
   build.textures.push(texture);
@@ -337,7 +351,7 @@ function buildOverlay(
         build,
         p,
         selected ? 0.18 : 0.13,
-        makeSpriteMat(build, texture, KIND_COLOR.point, 0.95),
+        makeSpriteMat(build, texture, KIND_COLOR.point, alpha(0.95)),
       );
       continue;
     }
@@ -346,7 +360,7 @@ function buildOverlay(
     const stroke = new LineBasicMaterial({
       color,
       transparent: true,
-      opacity: selected ? LINE_OPACITY_SELECTED : LINE_OPACITY,
+      opacity: alpha(selected ? LINE_OPACITY_SELECTED : LINE_OPACITY),
       depthWrite: false,
     });
     build.materials.push(stroke);
@@ -358,7 +372,7 @@ function buildOverlay(
       const fill = new MeshBasicMaterial({
         color,
         transparent: true,
-        opacity: 0.15,
+        opacity: alpha(0.15),
         side: 2, // THREE.DoubleSide (see lib/three-core.d.ts)
         depthWrite: false,
       });
@@ -420,22 +434,25 @@ export default function AnnotationOverlay({
   features,
   inProgress,
   selectedId,
+  opacityMultiplier,
   onLabelPositions,
 }: AnnotationOverlayProps) {
   const labelEls = useRef(new Map<string, HTMLDivElement>());
   const lastPositionsKey = useRef<string | null>(null);
 
   // Three.js scene graph: full rebuild on any prop change, full disposal on
-  // teardown / rebuild — nothing survives a photo switch.
+  // teardown / rebuild — nothing survives a photo switch. The multiplier is
+  // an ordinary prop here (annotation graphs are a handful of features; the
+  // overlay-opacity spec prefers in-place only where rebuilds would hurt).
   useEffect(() => {
-    const build = buildOverlay(viewer, cam, features, inProgress, selectedId);
+    const build = buildOverlay(viewer, cam, features, inProgress, selectedId, opacityMultiplier);
     viewer.renderer.addObject(build.group);
     viewer.needsUpdate();
     return () => {
       viewer.renderer.removeObject(build.group);
       build.dispose();
     };
-  }, [viewer, cam, features, inProgress, selectedId]);
+  }, [viewer, cam, features, inProgress, selectedId, opacityMultiplier]);
 
   // DOM labels: React owns the elements (props), the PSV "render" event owns
   // their transforms (direct style writes — no per-frame React state). PSV

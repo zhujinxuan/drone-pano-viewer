@@ -22,5 +22,6 @@ Glossary for the local drone-panorama viewer. Use these terms verbatim in issues
 | **reference layer** | An external, read-only, file-backed GeoJSON overlay (turbine foundations, avoidance areas…) passed via repeatable `--layer` flags. Produced and edited by outside tools; file changes reach the viewer by watch. The viewer never writes it. |
 | **measure** | An ephemeral two-point ground distance/bearing readout on the current pano. Never persisted — a measurement is not an annotation. |
 | **height** | An ephemeral vertical (tree-height) measurement on the current pano: **A** = tree base on the ground (flat-ground capture), **B** = tree-top pitch (any pitch, bearing ignored), `H = relAlt + d·tan(pitch_B)`. Never persisted, like **measure**. |
+| **overlay opacity** | The global `Alt+scroll` multiplier (10%–300%, 10% per notch, default 100%, persisted `pano.overlayOpacity`) scaling reference-layer and finished-annotation material alphas: effective = base × multiplier, capped at 1. Measure bands, HUD, reticle, in-progress sketch and selection affordances stay at base alpha. |
 
 Design decisions: see `docs/adr/0001-architecture.md`, `docs/adr/0002-annotations-outbound.md`, and `docs/adr/0003-reference-layers.md`.
